@@ -146,7 +146,7 @@ It prompts for three values:
 
 | Prompt | Example | Used for |
 |---|---|---|
-| Runtime domain | `sovereign.example.com` | Main app URL, WebAuthn origin |
+| Runtime domain | `example.com` | Main app URL, WebAuthn origin |
 | Auth domain | `auth.example.com` | Auth server URL, WebAuthn origin |
 | Root domain | `example.com` | WebAuthn RP_ID, cookie domain, email sender |
 
@@ -156,7 +156,7 @@ The script edits `caddy/conf.d/sovereign.caddy`, `apps/sovereign/.env.example`, 
 ```bash
 git diff
 git add caddy/conf.d/sovereign.caddy apps/sovereign/.env.example docs/ports.md
-git commit -m "config: set domain to sovereign.example.com"
+git commit -m "config: set domain to example.com"
 git push origin main
 ```
 
@@ -198,14 +198,14 @@ Add two A records pointing to your VPS IP (both use the same IP; Caddy routes by
 
 | Type | Name | Value |
 |---|---|---|
-| A | `sovereign.example.com` | `<VPS IP>` |
+| A | `example.com` | `<VPS IP>` |
 | A | `auth.example.com` | `<VPS IP>` |
 
 Verify propagation before continuing (the VPS must be reachable at these names for
 Caddy to provision Let's Encrypt certificates):
 
 ```bash
-dig +short sovereign.example.com
+dig +short example.com
 dig +short auth.example.com
 ```
 
@@ -290,7 +290,7 @@ import /etc/caddy/conf.d/*.caddy
 
 ```caddy
 # caddy/conf.d/sovereign.caddy — configured by ./configure.sh
-sovereign.example.com {
+example.com {
     import common_headers
     reverse_proxy 127.0.0.1:4000 {
         flush_interval -1   # required for SSE (live notifications)
@@ -379,11 +379,11 @@ pulls images, and starts the stack. Watch progress in your repo's Actions tab.
 Verify:
 
 ```bash
-curl -s https://sovereign.example.com/api/health
+curl -s https://example.com/api/health
 curl -s https://auth.example.com/api/health
 ```
 
-Open `https://sovereign.example.com`. The first user to register becomes admin.
+Open `https://example.com`. The first user to register becomes admin.
 After registering, lock registration:
 
 ```bash
@@ -693,7 +693,7 @@ See `docs/ports.md`.
 
 | Variable | Notes |
 |---|---|
-| `NEXT_PUBLIC_RUNTIME_URL` | Public runtime URL (e.g. `https://sovereign.example.com`) |
+| `NEXT_PUBLIC_RUNTIME_URL` | Public runtime URL (e.g. `https://example.com`) |
 | `AUTH_BASE_URL` | Public auth URL (e.g. `https://auth.example.com`) |
 | `AUTH_COOKIE_DOMAIN` | Cookie shared across subdomains (e.g. `.example.com`) |
 | `AUTH_WEBAUTHN_RP_ID` | Bare registrable domain (e.g. `example.com`) — changing invalidates passkeys |
@@ -803,7 +803,7 @@ docker exec caddy caddy reload --config /etc/caddy/Caddyfile
 
 # Admin health check
 curl -s -H "Authorization: Bearer $SOVEREIGN_ADMIN_KEY" \
-  https://sovereign.example.com/api/admin/health | jq .
+  https://example.com/api/admin/health | jq .
 
 # Check deployed version
 cat /opt/apps/sovereign/.deploy-version

@@ -31,7 +31,7 @@ validate_domain() {
     return 1
   fi
   if [[ "$domain" != *.* ]]; then
-    echo "$(red "Error:") $label must contain at least one dot (e.g. sovereign.example.com)" >&2
+    echo "$(red "Error:") $label must contain at least one dot (e.g. example.com)" >&2
     return 1
   fi
   if [[ "$domain" == */ ]]; then
@@ -48,14 +48,14 @@ echo ""
 echo "This configures the three domain placeholders used throughout this repo."
 echo "You can re-run this script at any time to update your domains."
 echo ""
-echo "  Runtime domain  — where the main app is served (e.g. sovereign.example.com)"
+echo "  Runtime domain  — where the main app is served (e.g. example.com)"
 echo "  Auth domain     — where the auth server is served (e.g. auth.example.com)"
 echo "  Root domain     — the registrable domain root (e.g. example.com)"
 echo "                    Used for WebAuthn RP_ID, cookie domain, and email sender."
 echo ""
 
 while true; do
-  read -r -p "$(bold 'Runtime domain') (e.g. sovereign.example.com): " RUNTIME_DOMAIN
+  read -r -p "$(bold 'Runtime domain') (e.g. example.com): " RUNTIME_DOMAIN
   validate_domain "$RUNTIME_DOMAIN" "Runtime domain" && break
 done
 
