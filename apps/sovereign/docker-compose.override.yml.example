@@ -1,0 +1,44 @@
+# apps/sovereign/docker-compose.override.yml.example
+#
+# Workaround for env vars that are consumed by the Sovereign code but missing
+# from the upstream docker-compose.prod.yml environment: blocks. Without these,
+# the vars have no effect even when set in .env.
+#
+# Usage:
+#   cp apps/sovereign/docker-compose.override.yml.example \
+#      apps/sovereign/docker-compose.override.yml
+#   git add apps/sovereign/docker-compose.override.yml
+#   git commit -m "config: enable compose override for missing env vars"
+#
+# The CI deploy job automatically copies this file to /opt/apps/sovereign/ on
+# the VPS when it is present in the repo. It is merged into the compose stack
+# alongside docker-compose.prod.yml and docker-compose.postgres.yml.
+#
+# Once sovereignfs/sovereign adds these to its own compose file, this override
+# can be removed.
+
+services:
+  auth:
+    environment:
+      # WebAuthn / passkeys — RP_ID must be the bare registrable domain.
+      # Without this, passkeys are scoped to the auth subdomain and cannot be
+      # presented on the runtime origin. Must match AUTH_WEBAUTHN_RP_ID in .env.
+      AUTH_WEBAUTHN_RP_ID: ${AUTH_WEBAUTHN_RP_ID}
+      AUTH_WEBAUTHN_RP_NAME: ${AUTH_WEBAUTHN_RP_NAME}
+      AUTH_WEBAUTHN_ORIGIN: ${AUTH_WEBAUTHN_ORIGIN}
+
+  runtime:
+    environment:
+      # Log level — without this, LOG_LEVEL in .env has no effect (always warn).
+      LOG_LEVEL: ${LOG_LEVEL:-warn}
+
+      # Web push — without these, push notifications are silently disabled even
+      # when VAPID keys are configured. Leave commented out if not using push.
+      # VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY}
+      # VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY}
+      # VAPID_CONTACT: ${VAPID_CONTACT}
+
+      # Notification transport — without this, NOTIFICATION_TRANSPORT in .env
+      # has no effect (always polling). Uncomment to enable SSE or Redis.
+      NOTIFICATION_TRANSPORT: ${NOTIFICATION_TRANSPORT:-polling}
+      # REDIS_URL: ${REDIS_URL}

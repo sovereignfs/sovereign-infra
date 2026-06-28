@@ -1,0 +1,16 @@
+# caddy/conf.d/_template.caddy.example
+# Copy to caddy/conf.d/myapp.caddy and fill in your domain and port.
+# The port must match APP_PORT in apps/myapp/.env.
+
+myapp.your.example.com {
+    import common_headers
+    reverse_proxy localhost:5000
+}
+
+# If your app needs SSE (server-sent events / streaming responses):
+# myapp.your.example.com {
+#     import common_headers
+#     reverse_proxy localhost:5000 {
+#         flush_interval -1
+#     }
+# }

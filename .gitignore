@@ -1,0 +1,15 @@
+# Real secret files — never committed
+apps/**/.env
+
+# Encrypted secrets — always committed
+# .env.enc files are the age-encrypted versions of .env
+# They are safe to commit because they can only be decrypted with the private key
+!apps/**/.env.enc
+
+# Decrypted output from scripts — never committed
+decrypted/
+
+# Editor and OS noise
+.DS_Store
+.idea/
+*.swp

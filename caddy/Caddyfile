@@ -1,0 +1,22 @@
+# /opt/infra/caddy/Caddyfile
+#
+# This file imports per-app vhost configs from conf.d/.
+# Do not add vhosts directly here — add a new *.caddy file in conf.d/ instead.
+#
+# Adding a new app:
+#   1. Create caddy/conf.d/myapp.caddy in this repo
+#   2. Push to main — CI reloads Caddy automatically
+#   3. That's it
+
+(common_headers) {
+    header {
+        # Remove server fingerprinting
+        -Server
+        # Basic security headers — apps can override these in their own block
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "SAMEORIGIN"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+}
+
+import /etc/caddy/conf.d/*.caddy

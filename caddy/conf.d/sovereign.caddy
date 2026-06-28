@@ -1,0 +1,20 @@
+# caddy/conf.d/sovereign.caddy
+# Vhosts for your Sovereign instance.
+# Run ./configure.sh to replace the placeholders below with your actual domains.
+
+# Runtime — main app
+YOUR_RUNTIME_DOMAIN {
+    import common_headers
+    reverse_proxy 127.0.0.1:4000 {
+        # flush_interval -1 ensures SSE (live notifications) streams through
+        # without buffering. Safe to leave on for all responses.
+        flush_interval -1
+    }
+}
+
+# Auth server — browsers are redirected here for login by the runtime.
+# Must be publicly reachable.
+YOUR_AUTH_DOMAIN {
+    import common_headers
+    reverse_proxy 127.0.0.1:4001
+}

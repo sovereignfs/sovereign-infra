@@ -1,0 +1,173 @@
+name: Sync and deploy
+
+# Any tag  → sync secrets + reload Caddy
+# v* tag   → sync first, then deploy sovereign (guaranteed order, no race)
+#
+# Push any tag to apply Caddy config changes or rotate secrets:
+#   git tag caddy && git push origin caddy
+#
+# Push a version tag to deploy a new sovereign release:
+#   git tag v0.9.10 && git push origin v0.9.10
+
+on:
+  push:
+    tags:
+      - '**'
+
+jobs:
+  sync:
+    name: Decrypt secrets, sync repo & reload Caddy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install age
+        run: |
+          curl -fsSL https://github.com/FiloSottile/age/releases/download/v1.2.0/age-v1.2.0-linux-amd64.tar.gz \
+            | tar xz --strip-components=1 -C /usr/local/bin age/age age/age-keygen
+
+      - name: Decrypt and bundle all app envs
+        id: bundle
+        env:
+          AGE_PRIVATE_KEY: ${{ secrets.AGE_PRIVATE_KEY }}
+        run: |
+          mkdir -p /tmp/envs
+          found=0
+          for enc_file in apps/*/.env.enc; do
+            [[ -f "$enc_file" ]] || continue
+            app=$(basename "$(dirname "$enc_file")")
+            [[ "$app" == "_template" ]] && continue
+            echo "Decrypting $app..."
+            echo "$AGE_PRIVATE_KEY" | age -d -i - "$enc_file" > "/tmp/envs/$app.env"
+            found=$((found + 1))
+          done
+          echo "Bundling $found app env(s)..."
+          ENVS_BUNDLE=$(tar czf - -C /tmp/envs . | base64 -w 0)
+          echo "ENVS_BUNDLE=$ENVS_BUNDLE" >> "$GITHUB_OUTPUT"
+          echo "Bundled $found app(s)."
+
+      - name: Sync repo, install secrets & reload Caddy
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          ENVS_BUNDLE: ${{ steps.bundle.outputs.ENVS_BUNDLE }}
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: 22
+          envs: ENVS_BUNDLE
+          script: |
+            set -e
+
+            # Install each app's .env — fully dynamic, no hardcoded app names
+            rm -rf /tmp/infra-envs && mkdir -p /tmp/infra-envs
+            echo "$ENVS_BUNDLE" | base64 -d | tar xz -C /tmp/infra-envs
+            for env_file in /tmp/infra-envs/*.env; do
+              [[ -f "$env_file" ]] || continue
+              app=$(basename "$env_file" .env)
+              mkdir -p "/opt/apps/$app"
+              install -m 600 "$env_file" "/opt/apps/$app/.env"
+              echo "Installed .env for $app"
+            done
+            rm -rf /tmp/infra-envs
+
+            # Pull latest config from git
+            cd /opt/infra
+            git pull origin main
+
+            # Validate and reload Caddy
+            docker exec caddy caddy validate --config /etc/caddy/Caddyfile
+            docker exec caddy caddy reload --config /etc/caddy/Caddyfile
+
+            echo "Sync complete at $(date -u)"
+
+  deploy:
+    name: Deploy sovereign ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    needs: sync   # .env must be installed before docker compose runs
+    if: startsWith(github.ref_name, 'v')
+
+    steps:
+      - name: Verify images exist on GHCR
+        run: |
+          TAG="${{ github.ref_name }}"
+          # Strip leading 'v' — GHCR images are tagged as semver without the prefix (e.g. 0.9.10 not v0.9.10)
+          IMAGE_TAG="${TAG#v}"
+          echo "Verifying GHCR images for sovereign ${IMAGE_TAG}..."
+
+          check_image() {
+            if docker manifest inspect "$1" > /dev/null 2>&1; then
+              echo "  ✓ $1"
+            else
+              echo "  ✗ $1 not found — has the sovereign release been published yet?" >&2
+              exit 1
+            fi
+          }
+
+          check_image "ghcr.io/sovereignfs/sovereign-runtime:${IMAGE_TAG}"
+          check_image "ghcr.io/sovereignfs/sovereign-auth:${IMAGE_TAG}"
+          echo "Images verified."
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy to VPS
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          SOVEREIGN_VERSION: ${{ github.ref_name }}
+          # Bundle the override file content if it exists (empty string if not)
+          HAS_OVERRIDE: ${{ hashFiles('apps/sovereign/docker-compose.override.yml') != '' && 'true' || 'false' }}
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: 22
+          envs: SOVEREIGN_VERSION,HAS_OVERRIDE
+          script_stop: true
+          script: |
+            set -e
+            APP_DIR="/opt/apps/sovereign"
+            mkdir -p "$APP_DIR"
+
+            # Strip leading 'v' — GHCR images and compose file refs use plain semver (0.9.10 not v0.9.10)
+            SOVEREIGN_VERSION="${SOVEREIGN_VERSION#v}"
+
+            # Fetch canonical compose files from the exact tagged sovereign release.
+            # sovereignfs/sovereign is public — no auth needed.
+            BASE="https://raw.githubusercontent.com/sovereignfs/sovereign/v${SOVEREIGN_VERSION}"
+            echo "Fetching compose files from sovereignfs/sovereign@${SOVEREIGN_VERSION}..."
+            curl -fsSL "${BASE}/docker-compose.prod.yml"     -o "$APP_DIR/docker-compose.prod.yml"
+            curl -fsSL "${BASE}/docker-compose.postgres.yml" -o "$APP_DIR/docker-compose.postgres.yml"
+            echo "  ✓ docker-compose.prod.yml"
+            echo "  ✓ docker-compose.postgres.yml"
+
+            # Copy the compose override file from the infra repo if it exists.
+            # This injects env vars missing from the upstream compose file (passkeys,
+            # VAPID, log level, notification transport). See apps/sovereign/docker-compose.override.yml.example.
+            OVERRIDE_SRC="/opt/infra/apps/sovereign/docker-compose.override.yml"
+            COMPOSE_EXTRA=""
+            if [[ -f "$OVERRIDE_SRC" ]]; then
+              cp "$OVERRIDE_SRC" "$APP_DIR/docker-compose.override.yml"
+              COMPOSE_EXTRA=":docker-compose.override.yml"
+              echo "  ✓ docker-compose.override.yml (from infra repo)"
+            fi
+
+            cd "$APP_DIR"
+
+            # Build COMPOSE_FILE — base + postgres + optional override.
+            # We set it explicitly here so the override is included when present,
+            # regardless of what COMPOSE_FILE is set to in .env.
+            COMPOSE_FILE_VAL="docker-compose.prod.yml:docker-compose.postgres.yml${COMPOSE_EXTRA}"
+
+            echo "Pulling images for sovereign ${SOVEREIGN_VERSION}..."
+            SOVEREIGN_VERSION="$SOVEREIGN_VERSION" COMPOSE_FILE="$COMPOSE_FILE_VAL" docker compose pull
+
+            echo "Starting sovereign ${SOVEREIGN_VERSION}..."
+            SOVEREIGN_VERSION="$SOVEREIGN_VERSION" COMPOSE_FILE="$COMPOSE_FILE_VAL" docker compose up -d
+
+            docker image prune -f
+
+            echo "$SOVEREIGN_VERSION" > "$APP_DIR/.deploy-version"
+            echo "Deployed sovereign ${SOVEREIGN_VERSION} at $(date -u)"

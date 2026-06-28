@@ -1,0 +1,22 @@
+services:
+  app:
+    image: # e.g. ghcr.io/you/myapp:${APP_VERSION:-latest}
+    container_name: # e.g. myapp
+    ports:
+      - '${APP_PORT:-5000}:3000'  # host_port:container_port
+    restart: unless-stopped
+    environment:
+      # Add your app's env vars here — reference .env.template values
+      SOME_SECRET: '${SOME_SECRET}'
+    # volumes:
+    #   - myapp_data:/app/data
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://127.0.0.1:3000/health']
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+# volumes:
+#   myapp_data:
+#     name: myapp_data
