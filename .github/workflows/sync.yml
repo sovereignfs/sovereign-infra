@@ -92,9 +92,7 @@ jobs:
     steps:
       - name: Verify images exist on GHCR
         run: |
-          TAG="${{ github.ref_name }}"
-          # Strip leading 'v' — GHCR images are tagged as semver without the prefix (e.g. 0.9.10 not v0.9.10)
-          IMAGE_TAG="${TAG#v}"
+          IMAGE_TAG="${{ github.ref_name }}"
           echo "Verifying GHCR images for sovereign ${IMAGE_TAG}..."
 
           check_image() {
@@ -131,12 +129,9 @@ jobs:
             APP_DIR="/opt/apps/sovereign"
             mkdir -p "$APP_DIR"
 
-            # Strip leading 'v' — GHCR images and compose file refs use plain semver (0.9.10 not v0.9.10)
-            SOVEREIGN_VERSION="${SOVEREIGN_VERSION#v}"
-
             # Fetch canonical compose files from the exact tagged sovereign release.
             # sovereignfs/sovereign is public — no auth needed.
-            BASE="https://raw.githubusercontent.com/sovereignfs/sovereign/v${SOVEREIGN_VERSION}"
+            BASE="https://raw.githubusercontent.com/sovereignfs/sovereign/${SOVEREIGN_VERSION}"
             echo "Fetching compose files from sovereignfs/sovereign@${SOVEREIGN_VERSION}..."
             curl -fsSL "${BASE}/docker-compose.prod.yml"     -o "$APP_DIR/docker-compose.prod.yml"
             curl -fsSL "${BASE}/docker-compose.postgres.yml" -o "$APP_DIR/docker-compose.postgres.yml"

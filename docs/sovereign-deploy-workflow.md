@@ -166,9 +166,9 @@ Or directly on the VPS:
 ```bash
 ssh deploy@<VPS IP>
 cd /opt/apps/sovereign
-SOVEREIGN_VERSION=0.9.9 COMPOSE_FILE=docker-compose.prod.yml:docker-compose.postgres.yml \
+SOVEREIGN_VERSION=v0.9.9 COMPOSE_FILE=docker-compose.prod.yml:docker-compose.postgres.yml \
   docker compose pull
-SOVEREIGN_VERSION=0.9.9 COMPOSE_FILE=docker-compose.prod.yml:docker-compose.postgres.yml \
+SOVEREIGN_VERSION=v0.9.9 COMPOSE_FILE=docker-compose.prod.yml:docker-compose.postgres.yml \
   docker compose up -d
 ```
 

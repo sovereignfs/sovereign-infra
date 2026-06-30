@@ -533,9 +533,9 @@ git tag v0.9.9 && git push origin v0.9.9
 # Or directly on VPS (no CI needed):
 ssh deploy@<VPS IP>
 cd /opt/apps/sovereign
-SOVEREIGN_VERSION=0.9.9 COMPOSE_FILE=docker-compose.prod.yml:docker-compose.postgres.yml \
+SOVEREIGN_VERSION=v0.9.9 COMPOSE_FILE=docker-compose.prod.yml:docker-compose.postgres.yml \
   docker compose pull
-SOVEREIGN_VERSION=0.9.9 COMPOSE_FILE=docker-compose.prod.yml:docker-compose.postgres.yml \
+SOVEREIGN_VERSION=v0.9.9 COMPOSE_FILE=docker-compose.prod.yml:docker-compose.postgres.yml \
   docker compose up -d
 ```
 
