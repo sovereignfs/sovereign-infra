@@ -1,5 +1,6 @@
 # Real secret files — never committed
 apps/**/.env
+env.yml
 
 # Encrypted secrets — always committed
 # .env.enc files are the age-encrypted versions of .env
