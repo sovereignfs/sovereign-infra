@@ -128,6 +128,10 @@ echo "==> Creating app directories"
 mkdir -p /opt/apps
 chown -R $VPS_USER:$VPS_USER /opt/apps
 
+echo "==> Creating backup repo directory"
+mkdir -p /opt/backups-repo
+chown -R $VPS_USER:$VPS_USER /opt/backups-repo
+
 echo "==> Symlinking app compose files from infra repo"
 # Only symlink apps that have a docker-compose.yml in the infra repo.
 # Apps managed by their own CI (like sovereign) don't have one — skip them.

@@ -18,8 +18,10 @@
 
 set -euo pipefail
 
+export PATH="/usr/local/bin:/usr/bin:/bin:${PATH:-}"
+
 DATE="${1:-}"
-REPO_DIR=/opt/backups-repo
+REPO_DIR="${BACKUP_REPO_DIR:-/opt/backups-repo}"
 
 # ── Ensure backup repo is present and up to date ──────────────────────────────
 if [[ ! -d "$REPO_DIR/.git" ]]; then

@@ -18,6 +18,8 @@
 
 set -euo pipefail
 
+export PATH="/usr/local/bin:/usr/bin:/bin:${PATH:-}"
+
 # ── Load env ──────────────────────────────────────────────────────────────────
 set -a
 # shellcheck disable=SC1091
@@ -27,7 +29,7 @@ set +a
 # ── Config ────────────────────────────────────────────────────────────────────
 DATE=$(date -u +%Y%m%d-%H%M%S)
 BACKUP_DIR=/tmp/sovereign-backup-$$
-REPO_DIR=/opt/backups-repo
+REPO_DIR="${BACKUP_REPO_DIR:-/opt/backups-repo}"
 RETENTION_DAYS=30
 POSTGRES_CONTAINER=sovereign-postgres
 RUNTIME_CONTAINER=sovereign-runtime
@@ -110,12 +112,23 @@ fi
 # ── 5. Push to GitHub ─────────────────────────────────────────────────────────
 log "Pushing to ${BACKUP_GITHUB_REPO}..."
 
+if [[ ! -d "$REPO_DIR/.git" ]]; then
+  echo "Error: backup repo is not cloned at $REPO_DIR." >&2
+  echo "Run /opt/infra/scripts/install-backup-cron.sh first." >&2
+  exit 1
+fi
+
 cd "$REPO_DIR"
 git config user.email "backup@sovereign"
 git config user.name "Sovereign Backup"
 
-git fetch origin main
-git reset --hard origin/main
+if git ls-remote --exit-code --heads origin main >/dev/null 2>&1; then
+  git fetch origin main
+  git reset --hard origin/main
+else
+  log "Remote main branch not found; initializing backup repo main branch."
+  git checkout -B main
+fi
 
 mkdir -p sovereign
 cp "$BACKUP_DIR"/sovereign/* sovereign/
@@ -125,7 +138,7 @@ git commit -m "backup: sovereign ${DATE}
 
 db, avatars, plugin manifest, isolated plugin DBs"
 
-git push "https://x-access-token:${BACKUP_GITHUB_TOKEN}@github.com/${BACKUP_GITHUB_REPO}.git" main
+git push -u "https://x-access-token:${BACKUP_GITHUB_TOKEN}@github.com/${BACKUP_GITHUB_REPO}.git" HEAD:main
 
 # ── 6. Prune old backups ──────────────────────────────────────────────────────
 log "Pruning backups older than ${RETENTION_DAYS} days..."
@@ -148,7 +161,7 @@ done
 
 if [[ "$PRUNED" -gt 0 ]]; then
   git commit -m "prune: remove ${PRUNED} backup file(s) older than ${RETENTION_DAYS} days"
-  git push "https://x-access-token:${BACKUP_GITHUB_TOKEN}@github.com/${BACKUP_GITHUB_REPO}.git" main
+  git push "https://x-access-token:${BACKUP_GITHUB_TOKEN}@github.com/${BACKUP_GITHUB_REPO}.git" HEAD:main
   log "  Pruned $PRUNED file(s)"
 else
   log "  Nothing to prune"

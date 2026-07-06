@@ -17,6 +17,10 @@
 
 set -euo pipefail
 
+export PATH="/usr/local/bin:/usr/bin:/bin:${PATH:-}"
+
+REPO_DIR="${BACKUP_REPO_DIR:-/opt/backups-repo}"
+
 # ── Load env ──────────────────────────────────────────────────────────────────
 set -a
 # shellcheck disable=SC1091
@@ -50,13 +54,34 @@ else
 fi
 
 # ── Clone backup repo ─────────────────────────────────────────────────────────
-if [[ ! -d /opt/backups-repo ]]; then
+if [[ ! -d "$REPO_DIR" ]]; then
+  if ! mkdir -p "$REPO_DIR" 2>/dev/null; then
+    echo "Error: cannot create $REPO_DIR as $(id -un)." >&2
+    echo "Create it as root, then rerun this script:" >&2
+    echo "  install -d -o $(id -un) -g $(id -gn) $REPO_DIR" >&2
+    exit 1
+  fi
+fi
+
+if [[ ! -w "$REPO_DIR" ]]; then
+  echo "Error: $REPO_DIR is not writable by $(id -un)." >&2
+  echo "Fix ownership as root, then rerun this script:" >&2
+  echo "  chown -R $(id -un):$(id -gn) $REPO_DIR" >&2
+  exit 1
+fi
+
+if [[ ! -d "$REPO_DIR/.git" ]]; then
+  if find "$REPO_DIR" -mindepth 1 -maxdepth 1 | grep -q .; then
+    echo "Error: $REPO_DIR exists but is not empty and is not a git repo." >&2
+    echo "Move its contents aside or set BACKUP_REPO_DIR to another path." >&2
+    exit 1
+  fi
   echo "==> Cloning ${BACKUP_GITHUB_REPO}..."
   git clone \
     "https://x-access-token:${BACKUP_GITHUB_TOKEN}@github.com/${BACKUP_GITHUB_REPO}.git" \
-    /opt/backups-repo
+    "$REPO_DIR"
 else
-  echo "/opt/backups-repo already exists — skipping clone"
+  echo "$REPO_DIR already contains a git repo — skipping clone"
 fi
 
 # ── Set up log file ───────────────────────────────────────────────────────────
@@ -70,7 +95,7 @@ echo "==> Log file: $HOME/logs/sovereign-backup.log"
 # automatically after every git pull (no manual reinstall required).
 SCRIPT_PATH="/opt/infra/scripts/backup-sovereign.sh"
 LOG_PATH="$HOME/logs/sovereign-backup.log"
-CRON_LINE="0 3 * * * $SCRIPT_PATH >> $LOG_PATH 2>&1"
+CRON_LINE="0 3 * * * PATH=/usr/local/bin:/usr/bin:/bin BACKUP_REPO_DIR=$REPO_DIR $SCRIPT_PATH >> $LOG_PATH 2>&1"
 
 if crontab -l 2>/dev/null | grep -qF "backup-sovereign.sh"; then
   echo "==> Cron job already registered — skipping"

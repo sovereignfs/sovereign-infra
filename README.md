@@ -571,7 +571,8 @@ recovery.
 
 **1. Create the backup repo on GitHub**
 
-Create a private repo (e.g. `<your-org>/sovereign-backups`). Leave it empty.
+Create a private repo (e.g. `<your-org>/sovereign-backups`). Leave it empty — the
+first successful backup initializes the `main` branch.
 
 **2. Create a GitHub PAT for backup writes**
 
@@ -596,14 +597,32 @@ git push origin main
 
 **4. Install the backup cron on the VPS**
 
+Backups are **not** enabled automatically by `bootstrap/setup.sh`. Bootstrap only
+creates `/opt/backups-repo` with the right ownership. Install the cron after
+`apps/sovereign/.env.enc` has been pushed and CI has decrypted it to
+`/opt/apps/sovereign/.env`, because the installer needs `BACKUP_GITHUB_TOKEN`,
+`BACKUP_GITHUB_REPO`, and `AGE_PUBLIC_KEY`.
+
 ```bash
 ssh deploy@<VPS IP>
 cd /opt/infra
 ./scripts/install-backup-cron.sh
 ```
 
+`bootstrap/setup.sh` creates `/opt/backups-repo` and gives it to the `deploy` user.
+On older servers provisioned before that directory existed, create or fix it once as
+root:
+
+```bash
+sudo install -d -o deploy -g deploy /opt/backups-repo
+# or, if it already exists:
+sudo chown -R deploy:deploy /opt/backups-repo
+```
+
 The cron job runs the script directly from `/opt/infra/scripts/backup-sovereign.sh` —
 script updates take effect after the next `git pull` (automatic on every infra push).
+The cron entry sets `PATH=/usr/local/bin:/usr/bin:/bin` so tools installed under
+`/usr/local/bin` such as `age` are available in the non-interactive cron environment.
 
 **5. Test it**
 
@@ -611,6 +630,10 @@ script updates take effect after the next `git pull` (automatic on every infra p
 /opt/infra/scripts/backup-sovereign.sh
 # Logs: ~/logs/sovereign-backup.log
 ```
+
+The first run works against a truly empty backup repo: the script creates the initial
+backup commit and pushes it to `main`. Later runs fetch and reset to `origin/main`
+before adding the next dated backup so the local clone stays aligned with the remote.
 
 ### Restore
 
@@ -642,6 +665,12 @@ VPS
 ```
 
 ### Encrypt a .env
+
+Current flow is manual: edit `apps/sovereign/.env`, then encrypt it. The planned
+replacement is tracked in [roadmap.md](roadmap.md#-infra-011--envyml-driven-encrypted-environment-generation):
+operators will maintain a git-ignored `env.yml`, and `scripts/generate-env.js`
+will fetch the latest upstream `.env.example`, render `apps/sovereign/.env`, and
+encrypt it to `apps/sovereign/.env.enc`.
 
 ```bash
 cp apps/sovereign/.env.example apps/sovereign/.env
