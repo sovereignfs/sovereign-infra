@@ -45,6 +45,20 @@ echo \
 apt-get update -qq
 apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-compose-plugin
 
+echo "==> Installing age"
+# Installed system-wide (root-run, /usr/local/bin is on every user's PATH) so
+# the deploy user — who has no sudo access by design (see below) — can run
+# scripts/decrypt-env.sh directly on the VPS without hitting a missing-sudo
+# wall. Pin matches the version .github/workflows/sync.yml installs in CI.
+AGE_VERSION="v1.2.0"
+if ! command -v age &>/dev/null; then
+  curl -fsSL "https://github.com/FiloSottile/age/releases/download/${AGE_VERSION}/age-${AGE_VERSION}-linux-amd64.tar.gz" \
+    | tar xz --strip-components=1 -C /usr/local/bin age/age age/age-keygen
+  echo "  age $(age --version) installed"
+else
+  echo "  age already installed: $(age --version)"
+fi
+
 echo "==> Configuring Docker log rotation"
 # Cap each container at 20 MB × 5 files — prevents logs from filling the disk.
 # Applies to all containers; no compose-level changes needed.
@@ -60,6 +74,11 @@ EOF
 systemctl restart docker
 
 echo "==> Creating deploy user"
+# Deliberately NOT added to sudoers — deploy only needs docker group
+# membership (compose up/pull/logs) plus whatever's preinstalled system-wide
+# above (age, docker, git, curl, jq). Any script meant to run as this user
+# must not shell out to `sudo`; install tools as root here in bootstrap
+# instead.
 if ! id "$VPS_USER" &>/dev/null; then
   useradd -m -s /bin/bash "$VPS_USER"
 fi
@@ -199,5 +218,11 @@ echo ""
 echo "  4. First sovereign deploy:"
 echo "     git tag v0.9.10 && git push origin v0.9.10"
 echo "     CI verifies the images and deploys automatically."
+echo ""
+echo "  Note: age is preinstalled system-wide, but the deploy user has no"
+echo "  sudo access (by design) and the age PRIVATE key is not on this VPS"
+echo "  (by design — it only ever lives in CI's AGE_PRIVATE_KEY secret)."
+echo "  See docs/sovereign-deploy-workflow.md's 'Applying an env change"
+echo "  manually' section before scp-ing the private key here yourself."
 echo ""
 echo "  See README.md for the full walkthrough."

@@ -176,6 +176,98 @@ Data lives in named Docker volumes and is never touched by an image swap.
 
 ---
 
+## Rotating secrets / applying an `.env` change
+
+### Recommended: push a tag, let CI handle it
+
+```bash
+./scripts/encrypt-env.sh sovereign
+git add apps/sovereign/.env.enc
+git commit -m "secrets: rotate <whatever changed>"
+git push origin main
+
+git tag env-update      # any non-v* tag name works
+git push origin env-update
+```
+
+The `sync` job decrypts, installs the new `.env` on the VPS, reloads Caddy,
+**and now also restarts every already-deployed app** so the change actually
+takes effect — it used to stop after installing the file, silently leaving
+the rotation inert until the next full version deploy. It only skips this
+restart for `v*` tags, since the `deploy` job that follows restarts sovereign
+again anyway with the new version.
+
+### Applying an env change manually (without pushing a tag)
+
+The deploy user (`deploy`) has **no `sudo` access**, by design — the VPS is
+provisioned that way for a reason, don't add it. `age` is preinstalled
+system-wide by `bootstrap/setup.sh`, so decrypting on the VPS doesn't need
+sudo either. What it does need is the age **private** key, which is **not**
+on the VPS by default — it only lives in your local machine / password
+manager and in the `AGE_PRIVATE_KEY` GitHub secret.
+
+Putting that key on the VPS permanently is a real security tradeoff: anyone
+who later compromises this VPS (or any other app running on it) can then
+decrypt every app's `.env.enc`, not just sovereign's. Prefer the tag-push
+path above unless you have a specific reason to do this by hand.
+
+If you do need to do it manually:
+
+1. **Pull the latest infra repo** on the VPS (to get a `.env.enc` you just
+   committed):
+   ```bash
+   ssh deploy@<VPS_HOST>
+   cd /opt/infra && git pull origin main
+   ```
+
+2. **Get the age private key onto the VPS** — from your *local* machine, not
+   the VPS. `scp` won't create the destination directory for you, so make it
+   first:
+   ```bash
+   ssh deploy@<VPS_HOST> 'mkdir -p ~/.age && chmod 700 ~/.age'
+   scp ~/.age/key.txt deploy@<VPS_HOST>:~/.age/key.txt
+   ssh deploy@<VPS_HOST> 'chmod 600 ~/.age/key.txt'
+   ```
+
+3. **Decrypt** (back on the VPS):
+   ```bash
+   cd /opt/infra
+   ./scripts/decrypt-env.sh sovereign ~/.age/key.txt
+   ```
+
+4. **Restart the containers** — this is the step that's easy to miss.
+   Sovereign's compose files aren't stored in this repo; they're fetched
+   fresh from the tagged `sovereignfs/sovereign` release only during a real
+   deploy. Don't run a bare `docker compose up -d` in `/opt/apps/sovereign`
+   without them present — if the compose files are missing or stale, Compose
+   can fall back to trying to *build* images from a local Dockerfile context
+   that doesn't exist on this VPS, instead of pulling the published ones
+   (`resolve : lstat /opt/apps/sovereign/apps: no such file or directory` is
+   this failure mode). Re-fetch the files for whatever version is currently
+   running, then restart — include the compose override if you've enabled
+   one (see "Known sovereign compose gaps" below):
+   ```bash
+   cd /opt/apps/sovereign
+   VERSION=$(cat .deploy-version)
+   BASE="https://raw.githubusercontent.com/sovereignfs/sovereign/${VERSION}"
+   curl -fsSL "${BASE}/docker-compose.prod.yml"     -o docker-compose.prod.yml
+   curl -fsSL "${BASE}/docker-compose.postgres.yml" -o docker-compose.postgres.yml
+
+   COMPOSE_FILE="docker-compose.prod.yml:docker-compose.postgres.yml"
+   [[ -f docker-compose.override.yml ]] && COMPOSE_FILE="${COMPOSE_FILE}:docker-compose.override.yml"
+
+   SOVEREIGN_VERSION="$VERSION" COMPOSE_FILE="$COMPOSE_FILE" docker compose pull
+   SOVEREIGN_VERSION="$VERSION" COMPOSE_FILE="$COMPOSE_FILE" docker compose up -d
+   ```
+
+5. **Consider removing the private key from the VPS afterward**, since it
+   isn't needed there day-to-day:
+   ```bash
+   rm ~/.age/key.txt
+   ```
+
+---
+
 ## Caddy config updates
 
 Changes to Caddy config (new vhost, security headers, etc.) are applied

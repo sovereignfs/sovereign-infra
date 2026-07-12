@@ -29,9 +29,30 @@ if [[ ! -f "$ENC_FILE" ]]; then
   exit 1
 fi
 
+if ! command -v age &>/dev/null; then
+  echo "Error: age is not installed (or not on PATH)." >&2
+  echo "A VPS bootstrapped with the current bootstrap/setup.sh has age" >&2
+  echo "preinstalled system-wide — if you're seeing this, either re-run" >&2
+  echo "bootstrap/setup.sh (as root) or install it yourself:" >&2
+  echo "  curl -fsSL https://github.com/FiloSottile/age/releases/download/v1.2.0/age-v1.2.0-linux-amd64.tar.gz \\" >&2
+  echo "    | tar xz --strip-components=1 -C ~/bin age/age age/age-keygen   # no sudo needed" >&2
+  echo "  export PATH=\"\$HOME/bin:\$PATH\"" >&2
+  exit 1
+fi
+
 mkdir -p "/opt/apps/$APP"
 
 if [[ -n "$KEY_FILE" ]]; then
+  if [[ ! -f "$KEY_FILE" ]]; then
+    echo "Error: key file not found: $KEY_FILE" >&2
+    echo "The age PRIVATE key is not provisioned on the VPS by default (by" >&2
+    echo "design — see docs/sovereign-deploy-workflow.md's 'Applying an env" >&2
+    echo "change manually' section). Copy it over first — from your LOCAL" >&2
+    echo "machine (not this VPS):" >&2
+    echo "  ssh $(whoami)@<VPS_HOST> 'mkdir -p ~/.age && chmod 700 ~/.age'" >&2
+    echo "  scp ~/.age/key.txt $(whoami)@<VPS_HOST>:~/.age/key.txt" >&2
+    exit 1
+  fi
   # Key from file
   age -d -i "$KEY_FILE" -o "$OUT_FILE" "$ENC_FILE"
 elif [[ -n "${AGE_PRIVATE_KEY:-}" ]]; then

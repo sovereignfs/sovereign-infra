@@ -44,11 +44,21 @@ if [[ -z "${AGE_PUBLIC_KEY:-}" ]]; then
 fi
 
 # ── Install age ───────────────────────────────────────────────────────────────
+# bootstrap/setup.sh installs age system-wide for a freshly-provisioned VPS —
+# this is a fallback for a VPS bootstrapped before that existed. It must not
+# assume sudo: the deploy user this script runs as has no sudoers entry (by
+# design), so `sudo tar ...` here would just fail with "not in the sudoers
+# file" — install into this user's own PATH instead.
 if ! command -v age &>/dev/null; then
-  echo "==> Installing age..."
+  echo "==> Installing age (user-local — deploy has no sudo access)..."
+  mkdir -p "$HOME/bin"
   curl -fsSL https://github.com/FiloSottile/age/releases/download/v1.2.0/age-v1.2.0-linux-amd64.tar.gz \
-    | sudo tar xz --strip-components=1 -C /usr/local/bin age/age age/age-keygen
-  echo "age $(age --version) installed"
+    | tar xz --strip-components=1 -C "$HOME/bin" age/age age/age-keygen
+  export PATH="$HOME/bin:$PATH"
+  if ! grep -qF 'export PATH="$HOME/bin:$PATH"' "$HOME/.bashrc" 2>/dev/null; then
+    echo 'export PATH="$HOME/bin:$PATH"' >> "$HOME/.bashrc"
+  fi
+  echo "age $(age --version) installed to $HOME/bin (added to ~/.bashrc for future sessions)"
 else
   echo "age already installed: $(age --version)"
 fi
@@ -95,7 +105,9 @@ echo "==> Log file: $HOME/logs/sovereign-backup.log"
 # automatically after every git pull (no manual reinstall required).
 SCRIPT_PATH="/opt/infra/scripts/backup-sovereign.sh"
 LOG_PATH="$HOME/logs/sovereign-backup.log"
-CRON_LINE="0 3 * * * PATH=/usr/local/bin:/usr/bin:/bin BACKUP_REPO_DIR=$REPO_DIR $SCRIPT_PATH >> $LOG_PATH 2>&1"
+# Includes $HOME/bin in case age landed there via the no-sudo fallback above
+# (a system-wide bootstrap install would already be on /usr/local/bin).
+CRON_LINE="0 3 * * * PATH=$HOME/bin:/usr/local/bin:/usr/bin:/bin BACKUP_REPO_DIR=$REPO_DIR $SCRIPT_PATH >> $LOG_PATH 2>&1"
 
 if crontab -l 2>/dev/null | grep -qF "backup-sovereign.sh"; then
   echo "==> Cron job already registered — skipping"

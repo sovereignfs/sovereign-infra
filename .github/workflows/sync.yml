@@ -1,7 +1,10 @@
 name: Sync and deploy
 
-# Any tag  → sync secrets + reload Caddy
-# v* tag   → sync first, then deploy sovereign (guaranteed order, no race)
+# Any tag  → sync secrets, reload Caddy, and restart already-deployed apps
+#            so a rotated secret actually takes effect
+# v* tag   → sync first, then deploy sovereign (guaranteed order, no race —
+#            the restart-on-sync step above is skipped for v* tags, since
+#            deploy immediately restarts sovereign again with the new version)
 #
 # Push any tag to apply Caddy config changes or rotate secrets:
 #   git tag caddy && git push origin caddy
@@ -82,6 +85,48 @@ jobs:
             docker exec caddy caddy reload --config /etc/caddy/Caddyfile
 
             echo "Sync complete at $(date -u)"
+
+      # A version tag (v*) triggers the `deploy` job right after this one,
+      # which fully restarts sovereign with the new version anyway —
+      # restarting it here too would just be a redundant flap on the
+      # outgoing version. For any other tag (a plain secret rotation or
+      # Caddy-only push), this step is the only thing that actually applies
+      # a changed .env to running containers — without it, a rotated secret
+      # just sits in .env, inert, until the next real version deploy.
+      - name: Restart already-deployed apps to apply new secrets
+        if: ${{ !startsWith(github.ref_name, 'v') }}
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: 22
+          script: |
+            set -e
+            for app_dir in /opt/apps/*/; do
+              app=$(basename "$app_dir")
+              [[ -f "$app_dir/.env" ]] || continue
+              if [[ "$app" == "sovereign" ]]; then
+                # sovereign's compose files are fetched fresh at deploy time
+                # (not stored in this repo) — only restart if a real deploy
+                # has actually happened, i.e. they're present on disk. Mirror
+                # the deploy job's COMPOSE_FILE construction so an active
+                # docker-compose.override.yml (env-var-gap workaround) stays
+                # included on restart too.
+                [[ -f "$app_dir/docker-compose.prod.yml" && -f "$app_dir/.deploy-version" ]] || continue
+                version=$(cat "$app_dir/.deploy-version")
+                compose_extra=""
+                [[ -f "$app_dir/docker-compose.override.yml" ]] && compose_extra=":docker-compose.override.yml"
+                echo "Restarting sovereign ($version) to apply updated secrets..."
+                (cd "$app_dir" && SOVEREIGN_VERSION="$version" \
+                  COMPOSE_FILE="docker-compose.prod.yml:docker-compose.postgres.yml${compose_extra}" \
+                  docker compose up -d)
+              elif [[ -f "$app_dir/docker-compose.yml" ]]; then
+                echo "Restarting $app to apply updated secrets..."
+                (cd "$app_dir" && docker compose up -d)
+              fi
+            done
+            echo "Restart pass complete at $(date -u)"
 
   deploy:
     name: Deploy sovereign ${{ github.ref_name }}
