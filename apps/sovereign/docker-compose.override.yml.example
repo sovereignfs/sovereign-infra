@@ -16,29 +16,22 @@
 #
 # Once sovereignfs/sovereign adds these to its own compose file, this override
 # can be removed.
+#
+# Fixed upstream as of v0.19.3 (no longer needed if you're deploying that
+# version or later): AUTH_WEBAUTHN_RP_ID, AUTH_WEBAUTHN_RP_NAME,
+# AUTH_WEBAUTHN_ORIGIN, LOG_LEVEL, VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY,
+# VAPID_CONTACT, NOTIFICATION_TRANSPORT, REDIS_URL. Removed from this example
+# below — if you already have an active override with these, it's now
+# redundant (harmless) and safe to trim, but not urgent.
 
 services:
-  auth:
-    environment:
-      # WebAuthn / passkeys — RP_ID must be the bare registrable domain.
-      # Without this, passkeys are scoped to the auth subdomain and cannot be
-      # presented on the runtime origin. Must match AUTH_WEBAUTHN_RP_ID in .env.
-      AUTH_WEBAUTHN_RP_ID: ${AUTH_WEBAUTHN_RP_ID}
-      AUTH_WEBAUTHN_RP_NAME: ${AUTH_WEBAUTHN_RP_NAME}
-      AUTH_WEBAUTHN_ORIGIN: ${AUTH_WEBAUTHN_ORIGIN}
-
   runtime:
     environment:
-      # Log level — without this, LOG_LEVEL in .env has no effect (always warn).
-      LOG_LEVEL: ${LOG_LEVEL:-warn}
-
-      # Web push — without these, push notifications are silently disabled even
-      # when VAPID keys are configured. Leave commented out if not using push.
-      # VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY}
-      # VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY}
-      # VAPID_CONTACT: ${VAPID_CONTACT}
-
-      # Notification transport — without this, NOTIFICATION_TRANSPORT in .env
-      # has no effect (always polling). Uncomment to enable SSE or Redis.
-      NOTIFICATION_TRANSPORT: ${NOTIFICATION_TRANSPORT:-polling}
-      # REDIS_URL: ${REDIS_URL}
+      # Plugin secret vault key (sdk.secrets) — still missing from upstream
+      # compose as of v0.19.3. Fails closed with no default: any plugin that
+      # stores/reads a secret (e.g. Plainwrite's GitHub PAT flow) breaks with
+      # "SOVEREIGN_VAULT_KEY is required before sdk.secrets can store or read
+      # secret values." at first use, not at container startup. Must also be
+      # set in .env (generate with `openssl rand -base64 32`) — this override
+      # alone does nothing if the value itself was never set.
+      SOVEREIGN_VAULT_KEY: ${SOVEREIGN_VAULT_KEY}

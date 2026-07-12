@@ -300,12 +300,16 @@ See the README for the full checklist. The short version:
 These env vars are read by the sovereign code but **not in sovereign's `docker-compose.prod.yml`
 `environment:` blocks**, so they have no effect even when set in `.env`.
 
-| Service | Missing vars | Impact |
-|---|---|---|
-| `auth` | `AUTH_WEBAUTHN_RP_ID`, `AUTH_WEBAUTHN_RP_NAME`, `AUTH_WEBAUTHN_ORIGIN` | RP_ID defaults to the auth subdomain hostname — passkeys registered on the runtime origin cannot be verified. Must be the bare registrable domain (e.g. `example.com`) to work across subdomains. |
-| `runtime` | `LOG_LEVEL` | Log level always defaults to `warn`; `debug`/`info` are unreachable via `.env`. |
-| `runtime` | `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`, `VAPID_CONTACT` | Push notifications silently disabled even when configured. |
-| `runtime` | `NOTIFICATION_TRANSPORT`, `REDIS_URL` | SSE/Redis transport unreachable without explicit compose configuration. |
+**Fixed as of `v0.19.3`** (no longer gaps — confirmed present in that release's
+`docker-compose.prod.yml`): `AUTH_WEBAUTHN_RP_ID`, `AUTH_WEBAUTHN_RP_NAME`,
+`AUTH_WEBAUTHN_ORIGIN`, `LOG_LEVEL`, `VAPID_PUBLIC_KEY`, `VAPID_PRIVATE_KEY`,
+`VAPID_CONTACT`, `NOTIFICATION_TRANSPORT`, `REDIS_URL`. If you activated the
+override for these, it's now redundant (harmless, but safe to trim) on any
+deploy at `v0.19.3` or later.
+
+| Service   | Missing var          | Impact                                                                                                                                                                                                                                          |
+| --------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `runtime` | `SOVEREIGN_VAULT_KEY` | The plugin secret vault (`sdk.secrets`) fails closed with no default — confirmed still missing from `docker-compose.prod.yml` as of `v0.19.3`. Surfaces as a runtime error the first time a plugin stores/reads a secret, not at container startup. Hit in practice via Plainwrite: "Connect using a token" fails with `SOVEREIGN_VAULT_KEY is required before sdk.secrets can store or read secret values.` A fix is in progress upstream (sovereign PR wiring it into the compose environment block); until a release tag ships with it, this stays an override-file workaround. |
 
 **Fix:** activate the compose override file included in this repo:
 
