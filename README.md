@@ -27,11 +27,11 @@ Full walkthrough below.
 
 ## Two-repo model
 
-| Repo | Role | Trigger | What it does |
-|---|---|---|---|
-| `sovereignfs/sovereign` | **Provider** | push `v*` tag | builds Docker images, pushes to GHCR |
-| `<you>/sovereign-infra` | **Operator** | push any tag | decrypts + installs app envs, reloads Caddy |
-| `<you>/sovereign-infra` | **Operator** | push matching `v*` tag | verifies GHCR images exist, deploys to VPS |
+| Repo                    | Role         | Trigger                | What it does                                |
+| ----------------------- | ------------ | ---------------------- | ------------------------------------------- |
+| `sovereignfs/sovereign` | **Provider** | push `v*` tag          | builds Docker images, pushes to GHCR        |
+| `<you>/sovereign-infra` | **Operator** | push any tag           | decrypts + installs app envs, reloads Caddy |
+| `<you>/sovereign-infra` | **Operator** | push matching `v*` tag | verifies GHCR images exist, deploys to VPS  |
 
 Sovereign publishes images when tagged. You deploy those images by pushing the same tag here.
 They are independent — see `docs/sovereign-deploy-workflow.md` for the full model.
@@ -65,13 +65,15 @@ apps/
 
 scripts/
   configure.sh            # one-time domain setup (run locally)
-  encrypt-env.sh          # encrypt apps/<name>/.env → .env.enc
+  generate-env.js         # env.yml + latest upstream .env.example → .env, .env.enc
+  encrypt-env.sh          # encrypt apps/<name>/.env → .env.enc (called by generate-env.js)
   decrypt-env.sh          # decrypt .env.enc → /opt/apps/<name>/.env
-  fetch-env-example.sh    # sync apps/sovereign/.env.example from upstream
   backup-sovereign.sh     # daily backup (run from cron on VPS)
   restore-sovereign.sh    # restore from a dated backup
   install-backup-cron.sh  # one-time backup cron + repo setup on VPS
   logs.sh                 # convenience docker logs wrapper
+
+env.example.yml  # template for env.yml — copy it, fill in real values, never commit the copy
 
 docs/
   ports.md                      # port registry — prevents collisions
@@ -119,16 +121,21 @@ docs/
 ## 1. Prerequisites
 
 **Local machine:**
+
 - `git`
 - `age` — `brew install age` (macOS) / `apt install age` (Ubuntu)
+- Node.js ≥18 — for `scripts/generate-env.js` (`npm install` once, see ["Secrets
+  Management"](#12-secrets-management))
 - SSH key pair for CI (generated below)
 
 **VPS:**
+
 - Ubuntu 24.04 LTS (any provider: Hetzner, DigitalOcean, Linode, etc.)
 - At least 1 GB RAM, 1 vCPU — Sovereign runs comfortably on a $5–6/month instance
 - A domain name with DNS you control
 
 **GitHub:**
+
 - This repo forked or used as template (must be **private** — it will contain `.env.enc` files)
 - A separate private repo for encrypted backups (created in step 11)
 
@@ -144,11 +151,11 @@ After forking, run `./configure.sh` once to stamp your domains into the config f
 
 It prompts for three values:
 
-| Prompt | Example | Used for |
-|---|---|---|
-| Runtime domain | `example.com` | Main app URL, WebAuthn origin |
-| Auth domain | `auth.example.com` | Auth server URL, WebAuthn origin |
-| Root domain | `example.com` | WebAuthn RP_ID, cookie domain, email sender |
+| Prompt         | Example            | Used for                                    |
+| -------------- | ------------------ | ------------------------------------------- |
+| Runtime domain | `example.com`      | Main app URL, WebAuthn origin               |
+| Auth domain    | `auth.example.com` | Auth server URL, WebAuthn origin            |
+| Root domain    | `example.com`      | WebAuthn RP_ID, cookie domain, email sender |
 
 The script edits `caddy/conf.d/sovereign.caddy`, `apps/sovereign/.env.example`, and
 `docs/ports.md` in place. Review the diff, then commit:
@@ -196,10 +203,10 @@ ssh-keygen -t ed25519 -C "sovereign-ci-deploy" -f ~/.ssh/sovereign_ci_deploy
 
 Add two A records pointing to your VPS IP (both use the same IP; Caddy routes by hostname):
 
-| Type | Name | Value |
-|---|---|---|
-| A | `example.com` | `<VPS IP>` |
-| A | `auth.example.com` | `<VPS IP>` |
+| Type | Name               | Value      |
+| ---- | ------------------ | ---------- |
+| A    | `example.com`      | `<VPS IP>` |
+| A    | `auth.example.com` | `<VPS IP>` |
 
 Verify propagation before continuing (the VPS must be reachable at these names for
 Caddy to provision Let's Encrypt certificates):
@@ -332,16 +339,22 @@ docker exec caddy caddy reload --config /etc/caddy/Caddyfile
 
 ```bash
 # Locally, in the infra repo:
-cp apps/sovereign/.env.example apps/sovereign/.env
-nano apps/sovereign/.env   # fill in all required values
-./scripts/encrypt-env.sh sovereign
-git add apps/sovereign/.env.enc
+cp env.example.yml env.yml   # git ignored — never commit this copy
+nano env.yml                 # fill in all required values
+node scripts/generate-env.js sovereign
+git add apps/sovereign/.env.example apps/sovereign/.env.enc
 git commit -m "secrets: sovereign initial"
 git push origin main
 # CI decrypts and installs /opt/apps/sovereign/.env on the VPS automatically
 ```
 
+`generate-env.js` fetches the latest upstream `apps/sovereign/.env.example`, renders
+`apps/sovereign/.env` from `env.yml`, and encrypts it to `apps/sovereign/.env.enc` — see
+["Secrets Management"](#12-secrets-management) for the full workflow, options, and what to
+do when validation fails.
+
 Key points:
+
 - `COMPOSE_FILE=docker-compose.prod.yml:docker-compose.postgres.yml` is set in `.env`
   so plain `docker compose` commands automatically use both files.
 - `AUTH_WEBAUTHN_RP_ID` must be the bare registrable domain (e.g. `example.com`).
@@ -388,8 +401,8 @@ After registering, lock registration:
 
 ```bash
 # Locally:
-nano apps/sovereign/.env        # set AUTH_INVITE_ONLY=true
-./scripts/encrypt-env.sh sovereign
+nano env.yml   # set apps.sovereign.AUTH_INVITE_ONLY: 'true'
+node scripts/generate-env.js sovereign
 git add apps/sovereign/.env.enc && git commit -m "config: enable invite-only"
 git push origin main
 # Apply immediately:
@@ -438,12 +451,12 @@ Add these to your infra repo → Settings → Secrets and variables → Actions 
 > These must be **repository secrets** (the "Variables" tab is for non-sensitive values
 > and will not work for these).
 
-| Secret | Value |
-|---|---|
-| `VPS_HOST` | VPS IP address |
-| `VPS_USER` | `deploy` |
-| `VPS_SSH_KEY` | Contents of `~/.ssh/sovereign_ci_deploy` (private key) |
-| `AGE_PRIVATE_KEY` | Contents of `~/.age/key.txt` (age private key) |
+| Secret            | Value                                                  |
+| ----------------- | ------------------------------------------------------ |
+| `VPS_HOST`        | VPS IP address                                         |
+| `VPS_USER`        | `deploy`                                               |
+| `VPS_SSH_KEY`     | Contents of `~/.ssh/sovereign_ci_deploy` (private key) |
+| `AGE_PRIVATE_KEY` | Contents of `~/.age/key.txt` (age private key)         |
 
 All four must exist before pushing any tag, otherwise the decrypt step fails immediately.
 
@@ -552,12 +565,12 @@ Revert the commit in your infra repo and push to `main`. CI applies it automatic
 
 ### What gets backed up
 
-| Component | Contents | Method |
-|---|---|---|
-| Postgres database | Platform + auth data | `pg_dump` → gzip → age encrypt |
-| User avatars | Profile images | tar → age encrypt |
-| Plugin manifest | `sovereign.plugins.json` | copy → age encrypt |
-| Isolated plugin DBs | `plugins/*.db` SQLite files | tar → age encrypt |
+| Component           | Contents                    | Method                         |
+| ------------------- | --------------------------- | ------------------------------ |
+| Postgres database   | Platform + auth data        | `pg_dump` → gzip → age encrypt |
+| User avatars        | Profile images              | tar → age encrypt              |
+| Plugin manifest     | `sovereign.plugins.json`    | copy → age encrypt             |
+| Isolated plugin DBs | `plugins/*.db` SQLite files | tar → age encrypt              |
 
 All four are age-encrypted before leaving the VPS and pushed to your private backup repo
 as a dated commit. Runs daily at 03:00 UTC, retained 30 days. Components with no data
@@ -577,6 +590,7 @@ first successful backup initializes the `main` branch.
 **2. Create a GitHub PAT for backup writes**
 
 GitHub → Settings → Developer settings → Fine-grained tokens:
+
 - Resource owner: `<your-org>`
 - Repository: `sovereign-backups` only
 - Permissions: Contents → Read and write
@@ -657,27 +671,41 @@ password manager
   └── ~/.age/key.txt  ← the one secret you protect manually
 
 git (this repo)
-  ├── apps/sovereign/.env.example  ← deployment skeleton, committed
+  ├── env.example.yml              ← template, committed, no secrets
+  ├── env.yml                      ← YOUR real values, git ignored, never committed
+  ├── apps/sovereign/.env.example  ← deployment skeleton, committed, auto-synced from upstream
   └── apps/sovereign/.env.enc      ← age-encrypted, safe to commit
 
 VPS
   └── /opt/apps/sovereign/.env     ← decrypted at deploy time, never in git
 ```
 
-### Encrypt a .env
+Operators edit **`env.yml`**, never `apps/sovereign/.env` directly — the latter is
+generated output and gets overwritten on every run. `scripts/generate-env.js` is the
+single tool for all three of the workflows below: it fetches the latest upstream
+`apps/sovereign/.env.example`, renders `apps/sovereign/.env` from `env.yml`, validates
+that nothing required is missing or still a placeholder, and encrypts the result to
+`apps/sovereign/.env.enc` (via `scripts/encrypt-env.sh`).
 
-Current flow is manual: edit `apps/sovereign/.env`, then encrypt it. The planned
-replacement is tracked in [roadmap.md](roadmap.md#-infra-011--envyml-driven-encrypted-environment-generation):
-operators will maintain a git-ignored `env.yml`, and `scripts/generate-env.js`
-will fetch the latest upstream `.env.example`, render `apps/sovereign/.env`, and
-encrypt it to `apps/sovereign/.env.enc`.
+```
+node scripts/generate-env.js sovereign                  # fetch + render + encrypt
+node scripts/generate-env.js sovereign --env-file env.yml  # explicit env.yml path (default)
+node scripts/generate-env.js sovereign --check           # validate only, write nothing
+node scripts/generate-env.js sovereign --no-fetch         # skip the network fetch
+```
+
+If a required value is missing or a placeholder (`YOUR_RUNTIME_DOMAIN`, `changeme`, etc.)
+survives into the render, the command fails with the list of offending variable **names**
+— never values — and writes nothing.
+
+### First-time setup
 
 ```bash
-cp apps/sovereign/.env.example apps/sovereign/.env
-nano apps/sovereign/.env        # fill in all values
-
-./scripts/encrypt-env.sh sovereign
-git add apps/sovereign/.env.enc
+npm install                    # once, installs js-yaml (scripts/generate-env.js)
+cp env.example.yml env.yml     # git ignored — never commit this copy
+nano env.yml                   # fill in all required values
+node scripts/generate-env.js sovereign
+git add apps/sovereign/.env.example apps/sovereign/.env.enc
 git commit -m "secrets: update sovereign"
 git push origin main
 # CI decrypts and installs on VPS automatically
@@ -686,8 +714,8 @@ git push origin main
 ### Rotate a secret
 
 ```bash
-nano apps/sovereign/.env
-./scripts/encrypt-env.sh sovereign
+nano env.yml   # edit the one value you're rotating
+node scripts/generate-env.js sovereign
 git add apps/sovereign/.env.enc && git commit -m "secrets: rotate AUTH_SECRET"
 git push origin main
 # Apply immediately without a full deploy:
@@ -696,13 +724,19 @@ ssh deploy@<VPS IP> "cd /opt/apps/sovereign && docker compose up -d"
 
 ### Sync .env.example with upstream sovereign
 
-When the sovereign repo adds new env vars, refresh the upstream section:
+Every normal (non-`--check`, non-`--no-fetch`) run fetches the latest upstream
+`.env.example` and rewrites `apps/sovereign/.env.example` if it changed, preserving
+everything below the `# ══ deployment overrides` line untouched:
 
 ```bash
-./scripts/fetch-env-example.sh
+node scripts/generate-env.js sovereign
 git diff apps/sovereign/.env.example
-git add apps/sovereign/.env.example && git commit -m "chore: sync sovereign .env.example"
+git add apps/sovereign/.env.example apps/sovereign/.env.enc
+git commit -m "chore: sync sovereign .env.example"
 ```
+
+`--check` never writes any file, including `.env.example` — use it only to validate
+`env.yml` (e.g. in CI) without touching the working tree.
 
 ---
 
@@ -712,40 +746,40 @@ git add apps/sovereign/.env.example && git commit -m "chore: sync sovereign .env
 
 See `docs/ports.md`.
 
-| Port | App |
-|---|---|
+| Port | App               |
+| ---- | ----------------- |
 | 4000 | sovereign-runtime |
-| 4001 | sovereign-auth |
-| 5000 | (next app) |
+| 4001 | sovereign-auth    |
+| 5000 | (next app)        |
 
 ### Key Sovereign environment variables
 
-| Variable | Notes |
-|---|---|
-| `NEXT_PUBLIC_RUNTIME_URL` | Public runtime URL (e.g. `https://example.com`) |
-| `AUTH_BASE_URL` | Public auth URL (e.g. `https://auth.example.com`) |
-| `AUTH_COOKIE_DOMAIN` | Cookie shared across subdomains (e.g. `.example.com`) |
-| `AUTH_WEBAUTHN_RP_ID` | Bare registrable domain (e.g. `example.com`) — changing invalidates passkeys |
-| `AUTH_WEBAUTHN_ORIGIN` | Comma-separated origins for passkeys |
-| `RUNTIME_PORT` / `AUTH_PORT` | Host ports (defaults: 4000 / 4001) |
-| `POSTGRES_PASSWORD` | Generate: `openssl rand -base64 32` |
-| `COMPOSE_FILE` | `docker-compose.prod.yml:docker-compose.postgres.yml` |
-| `BACKUP_GITHUB_REPO` | Backup destination (e.g. `myorg/sovereign-backups`) |
-| `AGE_PUBLIC_KEY` | `age1...` — your age public key |
+| Variable                     | Notes                                                                        |
+| ---------------------------- | ---------------------------------------------------------------------------- |
+| `NEXT_PUBLIC_RUNTIME_URL`    | Public runtime URL (e.g. `https://example.com`)                              |
+| `AUTH_BASE_URL`              | Public auth URL (e.g. `https://auth.example.com`)                            |
+| `AUTH_COOKIE_DOMAIN`         | Cookie shared across subdomains (e.g. `.example.com`)                        |
+| `AUTH_WEBAUTHN_RP_ID`        | Bare registrable domain (e.g. `example.com`) — changing invalidates passkeys |
+| `AUTH_WEBAUTHN_ORIGIN`       | Comma-separated origins for passkeys                                         |
+| `RUNTIME_PORT` / `AUTH_PORT` | Host ports (defaults: 4000 / 4001)                                           |
+| `POSTGRES_PASSWORD`          | Generate: `openssl rand -base64 32`                                          |
+| `COMPOSE_FILE`               | `docker-compose.prod.yml:docker-compose.postgres.yml`                        |
+| `BACKUP_GITHUB_REPO`         | Backup destination (e.g. `myorg/sovereign-backups`)                          |
+| `AGE_PUBLIC_KEY`             | `age1...` — your age public key                                              |
 
 ### Key file locations on VPS
 
-| Path | What it is |
-|---|---|
-| `/opt/infra/` | git clone of this repo |
-| `/opt/infra/caddy/` | Caddy config (synced on every push to main) |
-| `/opt/apps/sovereign/docker-compose.prod.yml` | Fetched from sovereign release |
-| `/opt/apps/sovereign/docker-compose.postgres.yml` | Fetched from sovereign release |
-| `/opt/apps/sovereign/docker-compose.override.yml` | Copied from infra repo (if present) |
-| `/opt/apps/<name>/.env` | App secrets — NOT in git |
-| `/opt/apps/<name>/.deploy-version` | Currently deployed tag |
-| `/opt/backups-repo/` | Clone of your backup repo |
-| `~/logs/` | Backup and app logs |
+| Path                                              | What it is                                  |
+| ------------------------------------------------- | ------------------------------------------- |
+| `/opt/infra/`                                     | git clone of this repo                      |
+| `/opt/infra/caddy/`                               | Caddy config (synced on every push to main) |
+| `/opt/apps/sovereign/docker-compose.prod.yml`     | Fetched from sovereign release              |
+| `/opt/apps/sovereign/docker-compose.postgres.yml` | Fetched from sovereign release              |
+| `/opt/apps/sovereign/docker-compose.override.yml` | Copied from infra repo (if present)         |
+| `/opt/apps/<name>/.env`                           | App secrets — NOT in git                    |
+| `/opt/apps/<name>/.deploy-version`                | Currently deployed tag                      |
+| `/opt/backups-repo/`                              | Clone of your backup repo                   |
+| `~/logs/`                                         | Backup and app logs                         |
 
 ---
 

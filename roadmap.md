@@ -113,6 +113,61 @@ provisioned VPS instances.
 
 - `pnpm exec prettier --check README.md`
 
+### ✅ INFRA-011 — env.yml-driven encrypted environment generation
+
+**Goal:** Replace manual `.env` editing with a repeatable local generator that
+renders `apps/sovereign/.env` from the latest upstream Sovereign `.env.example`
+plus operator-owned credentials in a git-ignored `env.yml`, then encrypts it to
+`apps/sovereign/.env.enc`.
+
+**Implemented:**
+
+- `scripts/generate-env.js` (Node ESM, `js-yaml` dependency —
+  `package.json`/`package-lock.json` added, `node_modules/` git ignored).
+  Replaces `scripts/fetch-env-example.sh` (removed — its fetch-and-splice
+  behavior was absorbed here rather than kept as a second, divergent path)
+  and reuses `scripts/encrypt-env.sh` as-is via `execFileSync`, with
+  `AGE_PUBLIC_KEY` passed through its environment and never logged.
+- `env.example.yml` — committed template covering every key
+  `apps/sovereign/.env.example`'s deployment-overrides block and critical
+  upstream keys need, required vs. optional clearly separated. Copy to
+  `env.yml` (git ignored) and fill in real values.
+- Command interface: `node scripts/generate-env.js <app>`, with `--env-file
+<path>`, `--check` (validates without writing any file), and `--no-fetch`
+  (skips the network fetch, renders from the committed `.env.example`).
+  Default mode fetches, renders, and encrypts.
+- Rendering resolves a KEY appearing more than once (once in the upstream
+  section with a local-dev default, again in the deployment-overrides block)
+  by last-occurrence-wins value, emitted once at the first-occurrence
+  position — a real duplicate-key bug found and fixed against the actual
+  fetched upstream template during verification (e.g. `DB_DIALECT` was being
+  emitted twice: `sqlite` then `postgres`).
+- Two-layer validation: an explicit `REQUIRED_KEYS` list (not inferred from
+  blank/placeholder heuristics, since some upstream keys are blank-but-
+  optional, e.g. `SMTP_USER`/`SMTP_PASS`) plus a generic scan for leftover
+  `YOUR_*`/`changeme` placeholder tokens in any active line, catching keys not
+  on the explicit list too (e.g. `SMTP_FROM`'s shipped placeholder default).
+- README: "Environment setup", "Secrets Management" (Encrypt a `.env` →
+  First-time setup, Rotate a secret, Sync `.env.example`), and the
+  invite-only rotation snippet rewritten to the `env.yml` + `generate-env.js`
+  workflow. Prerequisites now lists Node.js ≥18.
+
+**Verification:**
+
+- `env.yml` is ignored by git; `apps/sovereign/.env` remains ignored;
+  `apps/sovereign/.env.enc` is not ignored.
+- `node scripts/generate-env.js sovereign --check --no-fetch` fails clearly
+  (missing-required-values and unresolved-placeholder lists, by name only,
+  never values) against an incomplete `env.yml`, and passes against a
+  complete one.
+- Full run (fetch + render + encrypt) against a complete test `env.yml` and a
+  real generated age keypair: `.env` and `.env.enc` produced, decrypting
+  `.env.enc` reproduces `.env` byte-for-byte, no duplicate keys, no leftover
+  placeholders, no secret values printed to stdout.
+- `bash -n scripts/*.sh bootstrap/setup.sh configure.sh` passes, and so does a
+  `prettier --check` run over `README.md`, `roadmap.md`, `scripts/generate-env.js`,
+  `env.example.yml`, and `package.json`.
+
 ## Planned work
 
 ### 📋 INFRA-006 — Canonical backup repository layout
@@ -453,137 +508,6 @@ sv restore --local-only --input /tmp/sovereign-backup
 - Infra backup works with a platform release that has `sv backup --local-only`.
 - Infra backup fails clearly with older platform releases if no fallback is kept.
 - README documents the minimum Sovereign version for CLI-backed backups.
-
-### 📋 INFRA-011 — env.yml-driven encrypted environment generation
-
-**Goal:** Replace manual `.env` editing with a repeatable local generator that
-renders `apps/sovereign/.env` from the latest upstream Sovereign `.env.example`
-plus operator-owned credentials in a git-ignored `env.yml`, then encrypts it to
-`apps/sovereign/.env.enc`.
-
-**Script name:**
-
-- Add `scripts/generate-env.js`.
-- Do not use a shell script for the generator; use Node.js so YAML parsing,
-  validation, and env-file rendering are structured and testable.
-
-**Git ignore rules:**
-
-- `env.yml` must be git ignored.
-- `apps/**/.env` must remain git ignored.
-- `apps/**/.env.enc` remains committed.
-- Provide a committed `env.example.yml` or `env.template.yml` with placeholder
-  keys and comments, but no secrets.
-
-**Input files:**
-
-```text
-env.yml                         # operator credentials and deployment values, git ignored
-apps/sovereign/.env.example     # rendered template, committed
-apps/sovereign/.env             # generated plaintext env, git ignored
-apps/sovereign/.env.enc         # generated encrypted env, committed
-```
-
-**env.yml shape:**
-
-Use nested YAML with explicit app sections. The first implementation only needs
-`sovereign`, but the shape should allow future apps.
-
-```yaml
-global:
-  agePublicKey: age1...
-
-apps:
-  sovereign:
-    AUTH_SECRET: ...
-    SOVEREIGN_ADMIN_KEY: ...
-    POSTGRES_PASSWORD: ...
-    BACKUP_GITHUB_TOKEN: ...
-    BACKUP_GITHUB_REPO: your-org/sovereign-backups
-    AGE_PUBLIC_KEY: age1...
-```
-
-**Generator behavior:**
-
-1. Read `env.yml`.
-2. Fetch the latest upstream `.env.example` from
-   `https://raw.githubusercontent.com/sovereignfs/sovereign/main/.env.example`.
-3. Preserve the infra-specific deployment overrides block from
-   `apps/sovereign/.env.example`, starting at `# ══ deployment overrides`.
-4. Rewrite `apps/sovereign/.env.example` with:
-   - local infra header
-   - fetched upstream section
-   - deployment overrides block
-5. Render `apps/sovereign/.env` by applying values from `env.yml`.
-6. Fail if a required variable remains empty or a placeholder such as
-   `YOUR_RUNTIME_DOMAIN`, `YOUR_AUTH_DOMAIN`, `YOUR_ROOT_DOMAIN`,
-   `YOUR_ORG/YOUR_BACKUP_REPO`, or `changeme` remains in the generated `.env`.
-7. Run the existing encryption flow to produce `apps/sovereign/.env.enc`.
-8. Print a concise summary:
-   - upstream template fetched yes/no
-   - `.env.example` changed yes/no
-   - `.env` generated path
-   - `.env.enc` generated path
-   - variables missing, if any
-
-**Command interface:**
-
-```bash
-node scripts/generate-env.js sovereign
-node scripts/generate-env.js sovereign --env-file env.yml
-node scripts/generate-env.js sovereign --check
-node scripts/generate-env.js sovereign --no-fetch
-```
-
-**Required options:**
-
-- `--check` validates that `env.yml` can render a complete `.env` without
-  writing files.
-- `--no-fetch` skips the network fetch and uses the committed
-  `apps/sovereign/.env.example` template.
-- Default mode fetches upstream before rendering.
-
-**Implementation notes:**
-
-- Reuse or replace `scripts/fetch-env-example.sh`; do not leave two divergent
-  ways to update `apps/sovereign/.env.example`.
-- Reuse `scripts/encrypt-env.sh` initially, or move encryption into the Node
-  script only if the implementation still shells out to `age` safely without
-  logging secrets.
-- Never print secret values.
-- Never write `env.yml` or `apps/sovereign/.env` to git.
-- Preserve comments in `apps/sovereign/.env.example`; generated `.env` may omit
-  comments if that keeps rendering deterministic.
-- Keep `AGE_PUBLIC_KEY` available to encryption either from `env.yml.global`,
-  `apps.sovereign.AGE_PUBLIC_KEY`, or the process environment.
-
-**Dependencies:**
-
-- Existing `scripts/encrypt-env.sh`.
-- Existing `scripts/fetch-env-example.sh` behavior.
-
-**Deliverables:**
-
-- `scripts/generate-env.js`
-- `env.example.yml` or `env.template.yml`
-- Updated `.gitignore`
-- README section replacing the manual "Encrypt a .env" workflow with the
-  generator workflow
-- Roadmap update marking this task complete
-
-**Verification checklist:**
-
-- `env.yml` is ignored by git.
-- `apps/sovereign/.env` remains ignored by git.
-- `apps/sovereign/.env.enc` is not ignored.
-- `node scripts/generate-env.js sovereign --check --no-fetch` fails clearly when
-  required values are missing.
-- `node scripts/generate-env.js sovereign --no-fetch` renders `.env` and
-  `.env.enc` from a complete test `env.yml`.
-- Generated `.env` contains no unresolved `YOUR_*` placeholders.
-- Secret values are not printed to stdout or logs.
-- README explains that operators edit `env.yml`, not `.env`, for normal secret
-  rotation.
 
 ## Agent implementation rules
 

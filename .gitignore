@@ -10,6 +10,9 @@ env.yml
 # Decrypted output from scripts — never committed
 decrypted/
 
+# Node tooling (scripts/generate-env.js)
+node_modules/
+
 # Editor and OS noise
 .DS_Store
 .idea/
