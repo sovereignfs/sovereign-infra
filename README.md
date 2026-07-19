@@ -413,7 +413,9 @@ ssh deploy@<VPS IP> "cd /opt/apps/sovereign && docker compose up -d"
 
 ## 8. CI/CD Pipeline
 
-A single workflow file (`.github/workflows/sync.yml`) handles everything with two jobs:
+A single workflow file (`.github/workflows/sync.yml`) handles everything with a `sync`
+job plus one of two deploy jobs, chosen automatically by whether `sovereign.plugins.json`
+exists at the repo root:
 
 ```
 Push any tag   e.g.  git tag caddy && git push origin caddy
@@ -425,23 +427,26 @@ Job 1 — sync (always runs)
     ├── git pull /opt/infra
     └── Validate + reload Caddy (zero-downtime)
 
-Push v* tag   e.g.  git tag v0.9.10 && git push origin v0.9.10
-    │
-    ├── Job 1 — sync  (same as above)
-    │
-    └── Job 2 — deploy  (needs: sync — only after Job 1 completes)
-          Verify GHCR images exist for this tag
-          SSH into VPS:
-            curl docker-compose.prod.yml from sovereignfs/sovereign@v0.9.10
-            curl docker-compose.postgres.yml from sovereignfs/sovereign@v0.9.10
-            Copy docker-compose.override.yml if present in infra repo
-            docker compose pull && docker compose up -d
-            docker image prune -f
-            echo 0.9.10 > .deploy-version
+Push v* tag, sovereign.plugins.json ABSENT  →  Job "deploy" (published image)
+    Verify GHCR images exist for this tag
+    SSH into VPS:
+      curl docker-compose.prod.yml / .postgres.yml from sovereignfs/sovereign@vX.Y.Z
+      Copy docker-compose.override.yml if present in infra repo (compose-gap workaround)
+      docker compose pull && docker compose up -d
+      docker image prune -f · echo vX.Y.Z > .deploy-version
+
+Push v* tag, sovereign.plugins.json PRESENT  →  Job "deploy-custom" (private plugins)
+    Clone sovereignfs/sovereign@vX.Y.Z, overlay this repo's sovereign.plugins.json
+    docker buildx build --secret id=plugin_token,env=SOVEREIGN_PLUGIN_TOKEN --load
+    docker save | gzip → scp to VPS → docker load (no registry involved)
+    SSH into VPS: copy docker-compose.override.yml if present, write
+    docker-compose.custom-image.yml pointing runtime at the loaded image,
+    pull only sovereign-auth (still published), docker compose up -d
 ```
 
-If GHCR images don't exist for that tag, the deploy job fails before touching the VPS.
-The running version stays live.
+If the GHCR images don't exist for that tag, both deploy jobs fail before touching the VPS —
+the running version stays live either way. See ["Installing private
+plugins"](#installing-private-plugins) below for the custom-image path in full.
 
 ### GitHub Actions secrets
 
@@ -451,14 +456,73 @@ Add these to your infra repo → Settings → Secrets and variables → Actions 
 > These must be **repository secrets** (the "Variables" tab is for non-sensitive values
 > and will not work for these).
 
-| Secret            | Value                                                  |
-| ----------------- | ------------------------------------------------------ |
-| `VPS_HOST`        | VPS IP address                                         |
-| `VPS_USER`        | `deploy`                                               |
-| `VPS_SSH_KEY`     | Contents of `~/.ssh/sovereign_ci_deploy` (private key) |
-| `AGE_PRIVATE_KEY` | Contents of `~/.age/key.txt` (age private key)         |
+| Secret            | Value                                                                                                                                                 |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `VPS_HOST`        | VPS IP address                                                                                                                                        |
+| `VPS_USER`        | `deploy`                                                                                                                                              |
+| `VPS_SSH_KEY`     | Contents of `~/.ssh/sovereign_ci_deploy` (private key)                                                                                                |
+| `AGE_PRIVATE_KEY` | Contents of `~/.age/key.txt` (age private key)                                                                                                        |
+| `PLUGIN_TOKEN`    | Only needed once `sovereign.plugins.json` exists and declares a private-repo plugin — see ["Installing private plugins"](#installing-private-plugins) |
 
-All four must exist before pushing any tag, otherwise the decrypt step fails immediately.
+The first four must exist before pushing any tag, otherwise the decrypt step fails
+immediately. `PLUGIN_TOKEN` is only read by the `deploy-custom` job, so it's fine to
+leave unset until you actually add a private plugin.
+
+### Installing private plugins
+
+By default this repo deploys sovereign exactly as `sovereignfs/sovereign` published it — no
+build step, just a `docker compose pull`. To add a plugin from a private GitHub repo, commit a
+`sovereign.plugins.json` at this repo's root:
+
+```json
+{
+  "plugins": [
+    {
+      "id": "com.acme.crm",
+      "repository": "https://github.com/acme/sovereign-crm",
+      "tokenEnv": "SOVEREIGN_PLUGIN_TOKEN"
+    }
+  ]
+}
+```
+
+- `tokenEnv` must be exactly `SOVEREIGN_PLUGIN_TOKEN` — that's the fixed name the platform
+  Dockerfile's BuildKit secret mount exposes (v1 supports one shared token across every private
+  plugin declared here, not a different token per plugin).
+- Set the actual token value once as the `PLUGIN_TOKEN` **GitHub Actions secret** (not in an
+  app's `env.yml` — this is a build-time credential for cloning the plugin repo, not a runtime
+  app secret). A fine-grained PAT scoped to just that repository with **Contents: Read-only**
+  is the least privilege that works.
+- Public plugins can go in the same file with no `tokenEnv` field at all.
+
+Once `sovereign.plugins.json` exists, **every subsequent `v*` tag automatically takes the
+custom-build path** — `deploy-custom` instead of `deploy`. Nothing else changes: same tag
+command (`git tag v0.9.10 && git push origin v0.9.10`), same `.deploy-version` tracking
+(suffixed `-custom` so `cat /opt/apps/sovereign/.deploy-version` tells you which path last ran).
+
+The existing `docker-compose.override.yml` compose-gap workaround (see [Compose
+override](#compose-override-recommended) above) still applies on the custom-build path — it's
+copied from the infra repo and chained into `COMPOSE_FILE` alongside the new
+`docker-compose.custom-image.yml`, which is reserved for the runtime-image redirect and always
+distinct from the override file.
+
+To go back to the published-image path, delete `sovereign.plugins.json` and push a new tag — the
+next deploy fetches sovereign's own compose files fresh and removes any leftover
+`docker-compose.custom-image.yml` from a previous custom deploy.
+
+**Only `sovereign-runtime` is ever custom-built** — `sovereign-auth` doesn't compose plugins at
+all, so it always pulls `sovereignfs`'s published image regardless of which path is active.
+
+**Caveats:**
+
+- The build runs in the GitHub Actions runner, not the VPS, and never touches a registry — the
+  image is `docker save`d, shipped to the VPS over SSH, and `docker load`ed there. Expect the
+  `deploy-custom` job to take noticeably longer than a plain image pull (a full monorepo build
+  plus a several-hundred-MB transfer), and expect it to use more Actions minutes.
+- This whole mechanism exists because of a real gap in `sovereignfs/sovereign`'s own Dockerfile:
+  a plain `docker compose up --build` does **not** pass a build secret through on its own —
+  private-repo plugin cloning needs an explicit `docker buildx build --secret id=plugin_token,env=SOVEREIGN_PLUGIN_TOKEN`
+  invocation, which is exactly what `deploy-custom` runs on your behalf.
 
 ### Deploying a new version
 

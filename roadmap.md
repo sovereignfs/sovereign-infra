@@ -168,6 +168,59 @@ plus operator-owned credentials in a git-ignored `env.yml`, then encrypts it to
   `prettier --check` run over `README.md`, `roadmap.md`, `scripts/generate-env.js`,
   `env.example.yml`, and `package.json`.
 
+### ✅ INFRA-012 — Build-and-deploy path for private plugins
+
+**Goal:** Support deploying a sovereign-runtime image with private-repo
+plugins baked in, without publishing anything to a registry, and without
+disturbing the default published-image path for operators who don't need it.
+
+**Implemented:**
+
+- `.github/workflows/sync.yml`'s `sync` job gains a `detect` step
+  (`has_custom_plugins` output) that checks for `sovereign.plugins.json` at
+  the repo root.
+- `deploy` (published image) now runs only when that file is absent; a new
+  `deploy-custom` job runs only when it's present — mutually exclusive on
+  the same `v*` tag push, both gated behind `needs: sync`.
+- `deploy-custom` clones `sovereignfs/sovereign` at the pushed tag, overlays
+  this repo's `sovereign.plugins.json`, and runs
+  `docker buildx build --secret id=plugin_token,env=SOVEREIGN_PLUGIN_TOKEN`
+  in the Actions runner (far better resourced than the VPS) — depends on the
+  BuildKit secret mount added to `sovereignfs/sovereign`'s own `Dockerfile`.
+  The token value is read from this repo's `PLUGIN_TOKEN` secret.
+- No registry involved: the built image is `docker save`d, shipped to the
+  VPS over SSH (`appleboy/scp-action`), and `docker load`ed there. Only
+  `sovereign-runtime` is ever custom-built — `sovereign-auth` doesn't compose
+  plugins, so it always pulls the published image regardless of path.
+- The loaded image is wired in via a new `docker-compose.custom-image.yml`
+  written on the VPS — deliberately a different filename from this repo's
+  pre-existing `docker-compose.override.yml` (the compose-gap workaround for
+  env vars missing from the upstream compose file), since the two serve
+  unrelated purposes and must be able to coexist. `deploy-custom` still
+  copies and chains `docker-compose.override.yml` when present, exactly like
+  `deploy` does.
+- The `sync` job's secret-rotation restart step and the `deploy` job's
+  published-image path both account for a `docker-compose.custom-image.yml`
+  possibly left on disk by a prior custom deploy (chained into `COMPOSE_FILE`
+  on restart; removed on fallback to the published-image path).
+- README: rewrote the CI/CD pipeline diagram for both paths, added the
+  `PLUGIN_TOKEN` secret row, and a new "Installing private plugins" section
+  covering the `sovereign.plugins.json` shape, the `tokenEnv` convention,
+  and caveats (build cost, no registry, why the mechanism exists at all —
+  `sovereignfs/sovereign`'s own Dockerfile needs an explicit BuildKit secret,
+  which a plain `docker compose up --build` doesn't pass through).
+
+**Verification:**
+
+- `.github/workflows/sync.yml` parses as valid YAML (`js-yaml`) and passes
+  `prettier --check`.
+- Manually traced both `if:` conditions against `needs.sync.outputs.has_custom_plugins`
+  to confirm `deploy` and `deploy-custom` are mutually exclusive for every
+  `v*` tag push.
+- Not yet verified against a real GitHub Actions run — in particular,
+  `appleboy/scp-action`'s `strip_components: 1` behavior on the shipped
+  tarball needs confirming on first real trigger.
+
 ## Planned work
 
 ### 📋 INFRA-006 — Canonical backup repository layout
