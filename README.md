@@ -436,8 +436,9 @@ Push v* tag, sovereign.plugins.json ABSENT  →  Job "deploy" (published image)
       docker image prune -f · echo vX.Y.Z > .deploy-version
 
 Push v* tag, sovereign.plugins.json PRESENT  →  Job "deploy-custom" (private plugins)
+    Decrypt apps/_plugin-tokens/.env.enc if present (age, same key as everything else)
     Clone sovereignfs/sovereign@vX.Y.Z, overlay this repo's sovereign.plugins.json
-    docker buildx build --secret id=plugin_token,env=SOVEREIGN_PLUGIN_TOKEN --load
+    docker buildx build --secret id=plugin_tokens,src=<decrypted-tokens-file> --load
     docker save | gzip → scp to VPS → docker load (no registry involved)
     SSH into VPS: copy docker-compose.override.yml if present, write
     docker-compose.custom-image.yml pointing runtime at the loaded image,
@@ -456,17 +457,15 @@ Add these to your infra repo → Settings → Secrets and variables → Actions 
 > These must be **repository secrets** (the "Variables" tab is for non-sensitive values
 > and will not work for these).
 
-| Secret            | Value                                                                                                                                                 |
-| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `VPS_HOST`        | VPS IP address                                                                                                                                        |
-| `VPS_USER`        | `deploy`                                                                                                                                              |
-| `VPS_SSH_KEY`     | Contents of `~/.ssh/sovereign_ci_deploy` (private key)                                                                                                |
-| `AGE_PRIVATE_KEY` | Contents of `~/.age/key.txt` (age private key)                                                                                                        |
-| `PLUGIN_TOKEN`    | Only needed once `sovereign.plugins.json` exists and declares a private-repo plugin — see ["Installing private plugins"](#installing-private-plugins) |
+| Secret            | Value                                                  |
+| ----------------- | ------------------------------------------------------ |
+| `VPS_HOST`        | VPS IP address                                         |
+| `VPS_USER`        | `deploy`                                               |
+| `VPS_SSH_KEY`     | Contents of `~/.ssh/sovereign_ci_deploy` (private key) |
+| `AGE_PRIVATE_KEY` | Contents of `~/.age/key.txt` (age private key)         |
 
-The first four must exist before pushing any tag, otherwise the decrypt step fails
-immediately. `PLUGIN_TOKEN` is only read by the `deploy-custom` job, so it's fine to
-leave unset until you actually add a private plugin.
+All four must exist before pushing any tag, otherwise the decrypt step fails immediately.
+No extra GitHub secret is needed for private plugins — see below.
 
 ### Installing private plugins
 
@@ -480,19 +479,33 @@ build step, just a `docker compose pull`. To add a plugin from a private GitHub 
     {
       "id": "com.acme.crm",
       "repository": "https://github.com/acme/sovereign-crm",
-      "tokenEnv": "SOVEREIGN_PLUGIN_TOKEN"
+      "tokenEnv": "ACME_CRM_PLUGIN_TOKEN"
     }
   ]
 }
 ```
 
-- `tokenEnv` must be exactly `SOVEREIGN_PLUGIN_TOKEN` — that's the fixed name the platform
-  Dockerfile's BuildKit secret mount exposes (v1 supports one shared token across every private
-  plugin declared here, not a different token per plugin).
-- Set the actual token value once as the `PLUGIN_TOKEN` **GitHub Actions secret** (not in an
-  app's `env.yml` — this is a build-time credential for cloning the plugin repo, not a runtime
-  app secret). A fine-grained PAT scoped to just that repository with **Contents: Read-only**
-  is the least privilege that works.
+- `tokenEnv` can be any name you choose, and **each plugin can use a different one** — the
+  platform Dockerfile mounts a build secret _file_ of arbitrary `VAR=value` lines, not a single
+  named variable, so there's no cap and nothing to coordinate across plugins.
+- Set the actual token values in `apps/_plugin-tokens/.env` — copy from
+  `apps/_plugin-tokens/.env.example`, add one line per `tokenEnv` name, then encrypt it exactly
+  like any other app's secrets:
+  ```bash
+  cp apps/_plugin-tokens/.env.example apps/_plugin-tokens/.env
+  nano apps/_plugin-tokens/.env   # ACME_CRM_PLUGIN_TOKEN=ghp_xxx
+  ./scripts/encrypt-env.sh _plugin-tokens
+  git add apps/_plugin-tokens/.env.enc
+  git commit -m "secrets: add plugin token for com.acme.crm"
+  git push origin main
+  ```
+  This rides on the `AGE_PRIVATE_KEY` secret you already have — no new GitHub Actions secret to
+  create. Unlike every other `apps/*/.env.enc`, this one is **never installed on the VPS**; the
+  `sync` job explicitly skips it, and it's decrypted only inside `deploy-custom`, used to build
+  the image, then discarded.
+- A fine-grained GitHub PAT scoped to just that repository with **Contents: Read-only** is the
+  least privilege that works. One PAT can also cover several repos under the same owner, in which
+  case those plugins can share a `tokenEnv`.
 - Public plugins can go in the same file with no `tokenEnv` field at all.
 
 Once `sovereign.plugins.json` exists, **every subsequent `v*` tag automatically takes the
@@ -521,8 +534,9 @@ all, so it always pulls `sovereignfs`'s published image regardless of which path
   plus a several-hundred-MB transfer), and expect it to use more Actions minutes.
 - This whole mechanism exists because of a real gap in `sovereignfs/sovereign`'s own Dockerfile:
   a plain `docker compose up --build` does **not** pass a build secret through on its own —
-  private-repo plugin cloning needs an explicit `docker buildx build --secret id=plugin_token,env=SOVEREIGN_PLUGIN_TOKEN`
-  invocation, which is exactly what `deploy-custom` runs on your behalf.
+  private-repo plugin cloning needs an explicit
+  `docker buildx build --secret id=plugin_tokens,src=<tokens-file>` invocation, which is exactly
+  what `deploy-custom` runs on your behalf.
 
 ### Deploying a new version
 

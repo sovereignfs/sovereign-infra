@@ -26,9 +26,16 @@ name: Sync and deploy
 # if present). Remove sovereign.plugins.json to fall straight back to the
 # published-image path; nothing else needs to change.
 #
-# A plugin entry needing a private repo declares "tokenEnv": "SOVEREIGN_PLUGIN_TOKEN"
-# (see sovereignfs/sovereign's docs/plugin-development.md) — set the matching
-# value once as this repo's PLUGIN_TOKEN secret (Settings → Secrets → Actions).
+# A plugin entry needing a private repo declares its own "tokenEnv" name (see
+# sovereignfs/sovereign's docs/plugin-development.md) — a distinct name per
+# plugin is fully supported. Add the matching VAR=value line to
+# apps/_plugin-tokens/.env (copy from .env.example), encrypt it the same way
+# as any other app (./scripts/encrypt-env.sh _plugin-tokens), and commit
+# apps/_plugin-tokens/.env.enc. No GitHub Actions secret is needed for this —
+# it rides on the same AGE_PRIVATE_KEY already required for every other
+# secret. Unlike every other apps/*/.env.enc, this one is never installed
+# on the VPS — it's decrypted only inside the deploy-custom job and passed
+# straight to the build as a BuildKit secret file.
 
 on:
   push:
@@ -73,6 +80,9 @@ jobs:
             [[ -f "$enc_file" ]] || continue
             app=$(basename "$(dirname "$enc_file")")
             [[ "$app" == "_template" ]] && continue
+            # Build-time-only plugin clone tokens — never installed on the VPS
+            # as a runtime .env. deploy-custom decrypts this one separately.
+            [[ "$app" == "_plugin-tokens" ]] && continue
             echo "Decrypting $app..."
             echo "$AGE_PRIVATE_KEY" | age -d -i - "$enc_file" > "/tmp/envs/$app.env"
             found=$((found + 1))
@@ -281,6 +291,23 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Install age
+        run: |
+          curl -fsSL https://github.com/FiloSottile/age/releases/download/v1.2.0/age-v1.2.0-linux-amd64.tar.gz \
+            | tar xz --strip-components=1 -C /usr/local/bin age/age age/age-keygen
+
+      - name: Decrypt private plugin tokens (if any)
+        env:
+          AGE_PRIVATE_KEY: ${{ secrets.AGE_PRIVATE_KEY }}
+        run: |
+          if [[ -f apps/_plugin-tokens/.env.enc ]]; then
+            echo "$AGE_PRIVATE_KEY" | age -d -i - apps/_plugin-tokens/.env.enc > /tmp/plugin-tokens.env
+            echo "Decrypted apps/_plugin-tokens/.env.enc."
+          else
+            : > /tmp/plugin-tokens.env
+            echo "No apps/_plugin-tokens/.env.enc — building with no plugin tokens."
+          fi
+
       - name: Clone sovereign source at the pinned tag
         run: |
           git clone --depth 1 --branch "${{ github.ref_name }}" \
@@ -290,15 +317,14 @@ jobs:
         run: cp sovereign.plugins.json build/sovereign.plugins.json
 
       - name: Build sovereign-runtime with plugins baked in
-        env:
-          SOVEREIGN_PLUGIN_TOKEN: ${{ secrets.PLUGIN_TOKEN }}
         run: |
           docker buildx build \
-            --secret id=plugin_token,env=SOVEREIGN_PLUGIN_TOKEN \
+            --secret id=plugin_tokens,src=/tmp/plugin-tokens.env \
             --load \
             -t sovereign-runtime:custom \
             -f build/Dockerfile \
             build
+          rm -f /tmp/plugin-tokens.env
 
       - name: Save image to a transferable archive
         run: docker save sovereign-runtime:custom | gzip > /tmp/sovereign-runtime.tar.gz
