@@ -1,0 +1,16 @@
+{
+  "name": "sovereign-infra",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local tooling for the sovereign-infra deployment template.",
+  "scripts": {
+    "generate-env": "node scripts/generate-env.js"
+  },
+  "dependencies": {
+    "js-yaml": "^4.1.0"
+  },
+  "devDependencies": {
+    "prettier": "^3.9.5"
+  }
+}
