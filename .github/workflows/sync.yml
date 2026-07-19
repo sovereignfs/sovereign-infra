@@ -11,6 +11,24 @@ name: Sync and deploy
 #
 # Push a version tag to deploy a new sovereign release:
 #   git tag v0.9.10 && git push origin v0.9.10
+#
+# ── Custom-image path (private plugins) ─────────────────────────────────────
+# If sovereign.plugins.json exists at the repo root, a v* tag builds a custom
+# sovereign-runtime image (with your plugins baked in) instead of pulling
+# sovereignfs's published one. The build runs in this workflow's runner (far
+# better resourced than the VPS), never touches a registry — the image is
+# `docker save`d, shipped to the VPS over SSH, and `docker load`ed there — and
+# is picked up via a docker-compose.custom-image.yml the deploy step writes on
+# the VPS (a name distinct from docker-compose.override.yml, which is this
+# repo's own compose-gap workaround for env vars missing from the upstream
+# compose file — see apps/sovereign/docker-compose.override.yml.example. Both
+# files can be active at once; the custom-build path still applies the override
+# if present). Remove sovereign.plugins.json to fall straight back to the
+# published-image path; nothing else needs to change.
+#
+# A plugin entry needing a private repo declares "tokenEnv": "SOVEREIGN_PLUGIN_TOKEN"
+# (see sovereignfs/sovereign's docs/plugin-development.md) — set the matching
+# value once as this repo's PLUGIN_TOKEN secret (Settings → Secrets → Actions).
 
 on:
   push:
@@ -21,10 +39,23 @@ jobs:
   sync:
     name: Decrypt secrets, sync repo & reload Caddy
     runs-on: ubuntu-latest
+    outputs:
+      has_custom_plugins: ${{ steps.detect.outputs.result }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Detect custom plugins config
+        id: detect
+        run: |
+          if [[ -f sovereign.plugins.json ]]; then
+            echo "result=true" >> "$GITHUB_OUTPUT"
+            echo "sovereign.plugins.json present — will build a custom image."
+          else
+            echo "result=false" >> "$GITHUB_OUTPUT"
+            echo "No sovereign.plugins.json — using the published GHCR image."
+          fi
 
       - name: Install age
         run: |
@@ -86,9 +117,9 @@ jobs:
 
             echo "Sync complete at $(date -u)"
 
-      # A version tag (v*) triggers the `deploy` job right after this one,
-      # which fully restarts sovereign with the new version anyway —
-      # restarting it here too would just be a redundant flap on the
+      # A version tag (v*) triggers the `deploy`/`deploy-custom` job right
+      # after this one, which fully restarts sovereign with the new version
+      # anyway — restarting it here too would just be a redundant flap on the
       # outgoing version. For any other tag (a plain secret rotation or
       # Caddy-only push), this step is the only thing that actually applies
       # a changed .env to running containers — without it, a rotated secret
@@ -110,13 +141,15 @@ jobs:
                 # sovereign's compose files are fetched fresh at deploy time
                 # (not stored in this repo) — only restart if a real deploy
                 # has actually happened, i.e. they're present on disk. Mirror
-                # the deploy job's COMPOSE_FILE construction so an active
-                # docker-compose.override.yml (env-var-gap workaround) stays
-                # included on restart too.
+                # the deploy/deploy-custom jobs' COMPOSE_FILE construction so
+                # an active docker-compose.override.yml (env-var-gap
+                # workaround) and/or docker-compose.custom-image.yml (private
+                # plugins) stay included on restart too.
                 [[ -f "$app_dir/docker-compose.prod.yml" && -f "$app_dir/.deploy-version" ]] || continue
                 version=$(cat "$app_dir/.deploy-version")
                 compose_extra=""
-                [[ -f "$app_dir/docker-compose.override.yml" ]] && compose_extra=":docker-compose.override.yml"
+                [[ -f "$app_dir/docker-compose.override.yml" ]] && compose_extra="${compose_extra}:docker-compose.override.yml"
+                [[ -f "$app_dir/docker-compose.custom-image.yml" ]] && compose_extra="${compose_extra}:docker-compose.custom-image.yml"
                 echo "Restarting sovereign ($version) to apply updated secrets..."
                 (cd "$app_dir" && SOVEREIGN_VERSION="$version" \
                   COMPOSE_FILE="docker-compose.prod.yml:docker-compose.postgres.yml${compose_extra}" \
@@ -128,11 +161,12 @@ jobs:
             done
             echo "Restart pass complete at $(date -u)"
 
+  # ── Path 1: no sovereign.plugins.json — deploy sovereignfs's published image ──
   deploy:
-    name: Deploy sovereign ${{ github.ref_name }}
+    name: Deploy sovereign ${{ github.ref_name }} (published image)
     runs-on: ubuntu-latest
-    needs: sync   # .env must be installed before docker compose runs
-    if: startsWith(github.ref_name, 'v')
+    needs: sync # .env must be installed before docker compose runs
+    if: startsWith(github.ref_name, 'v') && needs.sync.outputs.has_custom_plugins == 'false'
 
     steps:
       - name: Verify images exist on GHCR
@@ -174,6 +208,10 @@ jobs:
             APP_DIR="/opt/apps/sovereign"
             mkdir -p "$APP_DIR"
 
+            # A previous custom-image deploy may have left one behind — remove
+            # it so this path always uses the published image cleanly.
+            rm -f "$APP_DIR/docker-compose.custom-image.yml"
+
             # Fetch canonical compose files from the exact tagged sovereign release.
             # sovereignfs/sovereign is public — no auth needed.
             BASE="https://raw.githubusercontent.com/sovereignfs/sovereign/${SOVEREIGN_VERSION}"
@@ -211,3 +249,127 @@ jobs:
 
             echo "$SOVEREIGN_VERSION" > "$APP_DIR/.deploy-version"
             echo "Deployed sovereign ${SOVEREIGN_VERSION} at $(date -u)"
+
+  # ── Path 2: sovereign.plugins.json present — build a custom image ──────────
+  # Builds in this runner (not the VPS — far better resourced), never pushes
+  # to a registry: docker save → scp → docker load on the VPS instead, picked
+  # up via a docker-compose.custom-image.yml written on the VPS. sovereign-auth
+  # is untouched — it doesn't compose plugins, so it still just pulls from
+  # sovereignfs's own GHCR image. The existing docker-compose.override.yml
+  # compose-gap workaround (see apps/sovereign/docker-compose.override.yml.example)
+  # still applies here too, chained alongside the custom-image file.
+  deploy-custom:
+    name: Build custom image (private plugins) & deploy
+    runs-on: ubuntu-latest
+    needs: sync
+    if: startsWith(github.ref_name, 'v') && needs.sync.outputs.has_custom_plugins == 'true'
+
+    steps:
+      - name: Checkout infra repo
+        uses: actions/checkout@v4
+
+      - name: Verify sovereign-auth image exists on GHCR
+        run: |
+          IMAGE_TAG="${{ github.ref_name }}"
+          if docker manifest inspect "ghcr.io/sovereignfs/sovereign-auth:${IMAGE_TAG}" > /dev/null 2>&1; then
+            echo "  ✓ ghcr.io/sovereignfs/sovereign-auth:${IMAGE_TAG}"
+          else
+            echo "  ✗ ghcr.io/sovereignfs/sovereign-auth:${IMAGE_TAG} not found — has the sovereign release been published yet?" >&2
+            exit 1
+          fi
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Clone sovereign source at the pinned tag
+        run: |
+          git clone --depth 1 --branch "${{ github.ref_name }}" \
+            https://github.com/sovereignfs/sovereign.git build
+
+      - name: Overlay this repo's sovereign.plugins.json
+        run: cp sovereign.plugins.json build/sovereign.plugins.json
+
+      - name: Build sovereign-runtime with plugins baked in
+        env:
+          SOVEREIGN_PLUGIN_TOKEN: ${{ secrets.PLUGIN_TOKEN }}
+        run: |
+          docker buildx build \
+            --secret id=plugin_token,env=SOVEREIGN_PLUGIN_TOKEN \
+            --load \
+            -t sovereign-runtime:custom \
+            -f build/Dockerfile \
+            build
+
+      - name: Save image to a transferable archive
+        run: docker save sovereign-runtime:custom | gzip > /tmp/sovereign-runtime.tar.gz
+
+      - name: Ship image to the VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: 22
+          source: /tmp/sovereign-runtime.tar.gz
+          target: /tmp/
+          strip_components: 1
+
+      - name: Load image & deploy to VPS
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          SOVEREIGN_VERSION: ${{ github.ref_name }}
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: 22
+          envs: SOVEREIGN_VERSION
+          script_stop: true
+          script: |
+            set -e
+            APP_DIR="/opt/apps/sovereign"
+            mkdir -p "$APP_DIR"
+
+            echo "Loading custom sovereign-runtime image..."
+            docker load -i /tmp/sovereign-runtime.tar.gz
+            rm -f /tmp/sovereign-runtime.tar.gz
+
+            # sovereign-auth still comes from the published image — only
+            # runtime has plugins baked in, so only it needs a local build.
+            BASE="https://raw.githubusercontent.com/sovereignfs/sovereign/${SOVEREIGN_VERSION}"
+            echo "Fetching compose files from sovereignfs/sovereign@${SOVEREIGN_VERSION}..."
+            curl -fsSL "${BASE}/docker-compose.prod.yml"     -o "$APP_DIR/docker-compose.prod.yml"
+            curl -fsSL "${BASE}/docker-compose.postgres.yml" -o "$APP_DIR/docker-compose.postgres.yml"
+
+            # Copy the compose override file from the infra repo if it exists —
+            # same env-var-gap workaround the published-image path applies.
+            OVERRIDE_SRC="/opt/infra/apps/sovereign/docker-compose.override.yml"
+            OVERRIDE_EXTRA=""
+            if [[ -f "$OVERRIDE_SRC" ]]; then
+              cp "$OVERRIDE_SRC" "$APP_DIR/docker-compose.override.yml"
+              OVERRIDE_EXTRA=":docker-compose.override.yml"
+              echo "  ✓ docker-compose.override.yml (from infra repo)"
+            fi
+
+            # Redirect just the runtime service at the image we just loaded —
+            # the fetched compose files hardcode ghcr.io/sovereignfs/... and
+            # have no env-var escape hatch for a different image reference.
+            cat > "$APP_DIR/docker-compose.custom-image.yml" <<'EOF'
+            services:
+              runtime:
+                image: sovereign-runtime:custom
+            EOF
+
+            cd "$APP_DIR"
+            export COMPOSE_FILE="docker-compose.prod.yml:docker-compose.postgres.yml${OVERRIDE_EXTRA}:docker-compose.custom-image.yml"
+
+            echo "Pulling sovereign-auth ${SOVEREIGN_VERSION} (runtime uses the locally loaded image)..."
+            SOVEREIGN_VERSION="$SOVEREIGN_VERSION" docker compose pull auth
+
+            echo "Starting sovereign ${SOVEREIGN_VERSION} (custom runtime)..."
+            SOVEREIGN_VERSION="$SOVEREIGN_VERSION" docker compose up -d
+
+            docker image prune -f
+
+            echo "${SOVEREIGN_VERSION}-custom" > "$APP_DIR/.deploy-version"
+            echo "Deployed sovereign ${SOVEREIGN_VERSION} (custom runtime) at $(date -u)"
