@@ -407,14 +407,21 @@ jobs:
             # Redirect just the runtime service at the image we just loaded —
             # the fetched compose files hardcode ghcr.io/sovereignfs/... and
             # have no env-var escape hatch for a different image reference.
-            cat > "$APP_DIR/docker-compose.custom-image.yml" <<'EOF'
-            services:
-              runtime:
-                image: sovereign-runtime:custom
-            EOF
+            # Written with printf (not a heredoc) — a quoted heredoc delimiter
+            # ('EOF') is fragile when the script is relayed through an SSH
+            # action's own quoting/templating layer, and can arrive on the VPS
+            # with mangled content.
+            printf '%s\n' \
+              'services:' \
+              '  runtime:' \
+              '    image: sovereign-runtime:custom' \
+              > "$APP_DIR/docker-compose.custom-image.yml"
 
             cd "$APP_DIR"
             export COMPOSE_FILE="docker-compose.prod.yml:docker-compose.postgres.yml${OVERRIDE_EXTRA}:docker-compose.custom-image.yml"
+
+            echo "Validating merged compose config..."
+            docker compose config > /dev/null
 
             echo "Pulling sovereign-auth ${SOVEREIGN_VERSION} (runtime uses the locally loaded image)..."
             SOVEREIGN_VERSION="$SOVEREIGN_VERSION" docker compose pull auth
