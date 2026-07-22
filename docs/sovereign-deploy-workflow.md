@@ -176,6 +176,49 @@ Data lives in named Docker volumes and is never touched by an image swap.
 
 ---
 
+## Rebuilding after a `sovereign.plugins.json`-only change
+
+If `sovereign.plugins.json` exists at this repo's root, every `v*` deploy
+already builds a custom `sovereign-runtime` image with those plugins baked
+in (see the `deploy-custom` job in `.github/workflows/sync.yml`). But
+editing `sovereign.plugins.json` alone — adding a plugin, bumping a
+plugin's `ref`, pointing at a different `repository` — does **not** by
+itself trigger a rebuild. The workflow only builds when it runs against a
+`v*` version, so a plugins-only edit just sits committed and inert until
+the next real version bump.
+
+Two ways to pick it up without bumping the sovereign version:
+
+**1. Re-point the existing version tag and re-push it:**
+
+```bash
+git tag v0.9.10 -f
+git push origin v0.9.10 -f
+```
+
+This re-fires the tag-push event, so `deploy-custom` reruns and rebuilds
+the image from the current `sovereign.plugins.json`, still pinned to the
+same sovereign source version. No workflow changes needed — this works
+today.
+
+**2. Run the workflow manually from the Actions tab:**
+
+Go to `.github/workflows/sync.yml` in the Actions tab → "Run workflow", and
+supply the `sovereign_version` input (e.g. `v0.9.10`). This runs the exact
+same `sync` → `deploy-custom` path as a tag push, without moving any git
+tag. Prefer this if you don't want force-pushed tags in your history.
+
+Either way, the version you supply must already be published on GHCR
+(`sovereign-auth` at minimum — `sovereign-runtime` is rebuilt locally in
+the custom-image path, so it doesn't need to exist there).
+
+**Env-var-only changes need neither of these.** They're never baked into
+the image — they're read from `.env` at container start — so the existing
+"push any non-`v*` tag" restart pass below already picks them up,
+including for an app running a custom image.
+
+---
+
 ## Rotating secrets / applying an `.env` change
 
 ### Recommended: push a tag, let CI handle it
